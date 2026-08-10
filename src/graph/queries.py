@@ -98,18 +98,35 @@ class CoverageGap(BaseModel):
 # Queries
 # ---------------------------------------------------------------------------
 
+#: The index is asked for more than `k` because the visibility filter runs after
+#: it. Without over-fetching, a run whose nearest neighbours happen to be another
+#: customer's confidential material would silently come back short.
+_VECTOR_OVERFETCH = 4
+
 _FIND_SIMILAR = """
-CALL db.index.vector.queryNodes($index_name, $k, $embedding)
+CALL db.index.vector.queryNodes($index_name, $fetch, $embedding)
 YIELD node, score
 MATCH (node)-[:BELONGS_TO]->(:Domain {key: $domain})
-OPTIONAL MATCH (node)-[:ANSWERED_BY]->(a:Answer)
+// A question only qualifies if it has at least one LIVE answer this customer is
+// allowed to see. Confidential material belongs to the customer whose RFP the
+// question was asked in.
+MATCH (node)-[:ANSWERED_BY]->(a:Answer)
+WHERE coalesce(a.superseded, false) = false
+  AND (
+    coalesce(a.confidential, false) = false
+    OR EXISTS {
+      MATCH (node)-[:ASKED_IN]->(:RFP)-[:ISSUED_BY]->(owner:Customer)
+      WHERE owner.name = $requesting_customer
+    }
+  )
 WITH node, score, collect(DISTINCT a.id) AS answer_ids
-RETURN node.id            AS question_id,
-       node.text          AS text,
+RETURN node.id              AS question_id,
+       node.text            AS text,
        node.normalized_text AS normalized_text,
-       score              AS score,
-       [x IN answer_ids WHERE x IS NOT NULL] AS answer_ids
+       score                AS score,
+       answer_ids           AS answer_ids
 ORDER BY score DESC, question_id ASC
+LIMIT $k
 """
 
 
@@ -118,25 +135,34 @@ async def find_similar_questions(
     *,
     embedding: list[float],
     domain: str,
+    requesting_customer: str,
     k: int,
 ) -> list[SimilarQuestion]:
-    """Top-k in-domain questions by cosine similarity.
+    """Top-k in-domain questions this customer is permitted to see.
 
-    The domain filter is part of the same query as the vector search — that is
-    the point of a native vector index, and why there is no separate vector
-    store to drift out of sync.
+    Domain filtering, supersession and confidentiality all resolve inside the
+    same query as the vector search. That is the point of a native vector index
+    — and it means a caller cannot obtain a candidate they should not have, no
+    matter what they do afterwards.
+
+    `requesting_customer` is required, not optional with a permissive default:
+    an optional visibility parameter is one forgotten argument away from a leak.
     """
     if k <= 0:
         return []
+    if not requesting_customer.strip():
+        raise ValueError("requesting_customer is required — visibility cannot be left implicit")
     expected = embedding_config().model.dimensions
     if len(embedding) != expected:
         raise ValueError(f"embedding has {len(embedding)} dimensions, index expects {expected}")
     result = await session.run(
         _FIND_SIMILAR,
         index_name=embedding_config().index.name,
+        fetch=k * _VECTOR_OVERFETCH,
         k=k,
         embedding=embedding,
         domain=domain,
+        requesting_customer=requesting_customer,
     )
     records = [record.data() async for record in result]
     return [SimilarQuestion.model_validate(record) for record in records]
@@ -270,11 +296,17 @@ async def get_sme_for_capability(session: AsyncSession, *, capability_id: str) -
 
 _ANSWERS_FOR_QUESTION = """
 MATCH (q:Question {id: $question_id})-[:ANSWERED_BY]->(a:Answer)
+OPTIONAL MATCH (q)-[:ASKED_IN]->(:RFP)-[:ISSUED_BY]->(cust:Customer)
+WITH q, a, cust
 WHERE ($exclude_superseded = false OR coalesce(a.superseded, false) = false)
-  AND ($exclude_confidential = false OR coalesce(a.confidential, false) = false)
+  // Confidentiality is not optional. A confidential answer is visible only to
+  // the customer it belongs to; there is no parameter that relaxes this.
+  AND (
+    coalesce(a.confidential, false) = false
+    OR cust.name = $requesting_customer
+  )
 OPTIONAL MATCH (a)-[:RESULTED_IN]->(o:Outcome)
 OPTIONAL MATCH (a)-[:AUTHORED_BY]->(sme:SME)
-OPTIONAL MATCH (q)-[:ASKED_IN]->(:RFP)-[:ISSUED_BY]->(cust:Customer)
 RETURN a.id          AS answer_id,
        a.text        AS text,
        a.answer_date AS answer_date,
@@ -291,20 +323,28 @@ async def answers_for_question(
     session: AsyncSession,
     *,
     question_id: str,
+    requesting_customer: str,
     exclude_superseded: bool = True,
-    exclude_confidential: bool = True,
 ) -> list[AnswerRecord]:
-    """Answers attached to a question, newest first.
+    """Answers attached to a question that this customer may see, newest first.
 
-    Both exclusions default to on and are applied inside Cypher. A superseded
-    answer reaching a draft is a staleness bug the eval harness scores at zero
-    tolerance, so the safe behaviour is the one you get by not thinking about it.
+    There is deliberately **no** `exclude_confidential` parameter. It was
+    removed rather than defaulted, because a boolean a caller can pass `False`
+    to is a leak waiting for one careless call site; confidentiality is now a
+    property of the query, not a choice the caller makes.
+
+    `exclude_superseded` remains a parameter because a caller sometimes
+    legitimately wants the full chain (lineage, audit). It defaults to on, since
+    a superseded answer reaching a draft is a staleness bug the harness scores
+    at zero tolerance.
     """
+    if not requesting_customer.strip():
+        raise ValueError("requesting_customer is required — visibility cannot be left implicit")
     result = await session.run(
         _ANSWERS_FOR_QUESTION,
         question_id=question_id,
+        requesting_customer=requesting_customer,
         exclude_superseded=exclude_superseded,
-        exclude_confidential=exclude_confidential,
     )
     records = [record.data() async for record in result]
     return [AnswerRecord.model_validate(record) for record in records]

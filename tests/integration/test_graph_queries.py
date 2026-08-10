@@ -31,6 +31,11 @@ pytestmark = pytest.mark.integration
 
 FIXTURES = Path(__file__).resolve().parents[2] / "fixtures"
 
+#: The golden RFP's issuer — the customer a normal run is executed for.
+MERIDIAN = "Meridian Insurance Group"
+#: The one customer with confidential material in the corpus.
+BLUEPINE = "Bluepine Health Systems"
+
 
 @pytest.fixture(scope="module", autouse=True)
 def _live_neo4j() -> None:
@@ -79,7 +84,11 @@ class TestVectorSearch:
         record = await result.single()
         assert record is not None, "no question carries an embedding"
         hits = await queries.find_similar_questions(
-            session, embedding=list(record["e"]), domain="cloud_migration", k=5
+            session,
+            embedding=list(record["e"]),
+            domain="cloud_migration",
+            requesting_customer=MERIDIAN,
+            k=5,
         )
         assert hits
         assert len(hits) <= 5
@@ -90,16 +99,28 @@ class TestVectorSearch:
         """Two identical queries must return the same order, or evals are noise."""
         embedding = fake_embedding("deterministic ordering probe", 768)
         first = await queries.find_similar_questions(
-            session, embedding=embedding, domain="cloud_migration", k=8
+            session,
+            embedding=embedding,
+            domain="cloud_migration",
+            requesting_customer=MERIDIAN,
+            k=8,
         )
         second = await queries.find_similar_questions(
-            session, embedding=embedding, domain="cloud_migration", k=8
+            session,
+            embedding=embedding,
+            domain="cloud_migration",
+            requesting_customer=MERIDIAN,
+            k=8,
         )
         assert [h.question_id for h in first] == [h.question_id for h in second]
 
     async def test_an_unknown_domain_returns_nothing(self, session: AsyncSession) -> None:
         hits = await queries.find_similar_questions(
-            session, embedding=fake_embedding("x", 768), domain="payroll_services", k=5
+            session,
+            embedding=fake_embedding("x", 768),
+            domain="payroll_services",
+            requesting_customer=MERIDIAN,
+            k=5,
         )
         assert hits == []
 
@@ -107,7 +128,22 @@ class TestVectorSearch:
         """Caught before it reaches the index, where the error would be opaque."""
         with pytest.raises(ValueError, match="dimensions"):
             await queries.find_similar_questions(
-                session, embedding=[0.1] * 128, domain="cloud_migration", k=5
+                session,
+                embedding=[0.1] * 128,
+                domain="cloud_migration",
+                requesting_customer=MERIDIAN,
+                k=5,
+            )
+
+    async def test_an_empty_requesting_customer_is_refused(self, session: AsyncSession) -> None:
+        """Visibility must never be left implicit."""
+        with pytest.raises(ValueError, match="requesting_customer"):
+            await queries.find_similar_questions(
+                session,
+                embedding=fake_embedding("x", 768),
+                domain="cloud_migration",
+                requesting_customer="   ",
+                k=5,
             )
 
 
@@ -220,33 +256,127 @@ class TestAnswersForQuestion:
         self, session: AsyncSession, pairs: list[dict[str, Any]]
     ) -> None:
         old = next(p for p in pairs if p["superseded_by"])
-        answers = await queries.answers_for_question(session, question_id=old["question_id"])
+        answers = await queries.answers_for_question(
+            session, question_id=old["question_id"], requesting_customer=MERIDIAN
+        )
         assert old["answer_id"] not in {a.answer_id for a in answers}
 
     async def test_can_include_superseded_explicitly(
         self, session: AsyncSession, pairs: list[dict[str, Any]]
     ) -> None:
+        """Lineage and audit legitimately want the whole chain."""
         old = next(p for p in pairs if p["superseded_by"])
         answers = await queries.answers_for_question(
-            session, question_id=old["question_id"], exclude_superseded=False
+            session,
+            question_id=old["question_id"],
+            requesting_customer=MERIDIAN,
+            exclude_superseded=False,
         )
         assert old["answer_id"] in {a.answer_id for a in answers}
 
-    async def test_excludes_confidential_by_default(
+    async def test_an_empty_requesting_customer_is_refused(
         self, session: AsyncSession, pairs: list[dict[str, Any]]
     ) -> None:
-        secret = next(p for p in pairs if p["confidential"])
-        answers = await queries.answers_for_question(session, question_id=secret["question_id"])
-        assert secret["answer_id"] not in {a.answer_id for a in answers}
+        with pytest.raises(ValueError, match="requesting_customer"):
+            await queries.answers_for_question(
+                session, question_id=pairs[0]["question_id"], requesting_customer=""
+            )
 
-    async def test_confidential_is_reachable_only_when_asked_for(
+
+class TestConfidentialityAtTheQueryBoundary:
+    """Confidential material cannot cross customers, whatever the caller does.
+
+    There is no parameter that relaxes this — `exclude_confidential` was deleted
+    rather than defaulted, because a boolean a caller can pass `False` to is one
+    careless call site away from a leak. These tests prove the guarantee at the
+    boundary; the Phase 5 adversarial eval re-proves it end to end.
+    """
+
+    async def test_confidential_answers_never_cross_customers_at_the_query_boundary(
         self, session: AsyncSession, pairs: list[dict[str, Any]]
     ) -> None:
         secret = next(p for p in pairs if p["confidential"])
-        answers = await queries.answers_for_question(
-            session, question_id=secret["question_id"], exclude_confidential=False
+        assert secret["customer"] == BLUEPINE
+
+        for_meridian = await queries.answers_for_question(
+            session, question_id=secret["question_id"], requesting_customer=MERIDIAN
         )
-        assert secret["answer_id"] in {a.answer_id for a in answers}
+        assert secret["answer_id"] not in {a.answer_id for a in for_meridian}
+
+    async def test_the_owning_customer_can_still_see_its_own_confidential_answer(
+        self, session: AsyncSession, pairs: list[dict[str, Any]]
+    ) -> None:
+        """Confidentiality is not deletion — Bluepine's own run must still use it."""
+        secret = next(p for p in pairs if p["confidential"])
+        for_bluepine = await queries.answers_for_question(
+            session, question_id=secret["question_id"], requesting_customer=BLUEPINE
+        )
+        assert secret["answer_id"] in {a.answer_id for a in for_bluepine}
+
+    async def test_a_confidential_question_is_not_even_a_candidate_for_another_customer(
+        self, session: AsyncSession, pairs: list[dict[str, Any]]
+    ) -> None:
+        """Closes the gap where it could surface as a similarity candidate.
+
+        Retrieving the confidential answer's own embedding makes it the nearest
+        possible neighbour — so if visibility filtering were missing anywhere in
+        the candidate path, this is the query that would expose it.
+        """
+        secret = next(p for p in pairs if p["confidential"])
+        result = await session.run(
+            "MATCH (q:Question {id: $qid}) RETURN q.embedding AS e",
+            qid=secret["question_id"],
+        )
+        record = await result.single()
+        assert record is not None and record["e"], "confidential question has no embedding"
+
+        for_meridian = await queries.find_similar_questions(
+            session,
+            embedding=list(record["e"]),
+            domain="cloud_migration",
+            requesting_customer=MERIDIAN,
+            k=20,
+        )
+        assert secret["question_id"] not in {h.question_id for h in for_meridian}
+
+    async def test_the_owning_customer_does_get_it_as_a_candidate(
+        self, session: AsyncSession, pairs: list[dict[str, Any]]
+    ) -> None:
+        secret = next(p for p in pairs if p["confidential"])
+        result = await session.run(
+            "MATCH (q:Question {id: $qid}) RETURN q.embedding AS e",
+            qid=secret["question_id"],
+        )
+        record = await result.single()
+        assert record is not None
+
+        for_bluepine = await queries.find_similar_questions(
+            session,
+            embedding=list(record["e"]),
+            domain="cloud_migration",
+            requesting_customer=BLUEPINE,
+            k=20,
+        )
+        assert secret["question_id"] in {h.question_id for h in for_bluepine}
+
+    async def test_filtering_does_not_shrink_the_candidate_list(
+        self, session: AsyncSession
+    ) -> None:
+        """The index is over-fetched so visibility filtering still yields k.
+
+        Without over-fetching, a run whose nearest neighbours happened to be
+        another customer's material would quietly come back short — fewer
+        candidates, no error, worse answers.
+        """
+        embedding = fake_embedding("landing zone guardrails", 768)
+        hits = await queries.find_similar_questions(
+            session,
+            embedding=embedding,
+            domain="cloud_migration",
+            requesting_customer=MERIDIAN,
+            k=20,
+        )
+        assert len(hits) == 20
 
 
 class TestCoverageGaps:
