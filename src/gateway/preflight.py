@@ -1,20 +1,26 @@
-"""Preflight: prove the embedding path works before anything writes to the graph.
+"""Preflight: prove the local model path works before anything writes to the graph.
 
-Ingest computes embeddings for the whole corpus and stores them in a Neo4j
-vector index built for a fixed width. Three things can be wrong, and only one of
-them announces itself:
+Four classes of problem, in increasing order of how long they take to notice:
 
-* Ollama is not running — obvious, fails immediately.
-* The pinned model is not installed — a confusing 404 from deep inside ingest.
-* The model returns a different width than the index expects — **silent**. The
-  index rejects or mismatches vectors and retrieval quietly degrades.
+* **Ollama is not running** — obvious, fails immediately.
+* **A pinned model is not installed** — a confusing 404 from deep inside a run.
+* **A reference is not really a pin** (`ollama/llama3.2`, or an explicit
+  `:latest`) — invisible until two machines quietly disagree about what an alias
+  means, by which point the divergence is weeks old.
+* **The embedding model returns a different width than the index expects** —
+  **silent**. Vectors go in unusable and retrieval simply gets worse.
 
-So the third check is a real probe embedding whose length is measured, not
-assumed from documentation. `make ingest` refuses to run until all three pass.
+The model checks walk the gateway config rather than a hardcoded list, so an
+alias added in a later phase is covered the day it appears rather than the day
+someone remembers to add a check for it. The embedding model gets one deeper
+check on top: a real probe embedding whose length is measured, not read from
+documentation.
 
-The checks are plain functions returning results so they can be tested against a
-stubbed endpoint — including the model-absent case, which is otherwise awkward
-to reproduce without uninstalling someone's model.
+`make ingest` refuses to run until all of them pass.
+
+Every check is a plain function returning a result, so they can be driven
+against a stubbed endpoint — including the model-absent case, which is otherwise
+awkward to reproduce without uninstalling someone's model.
 """
 
 from __future__ import annotations
@@ -24,8 +30,8 @@ from dataclasses import dataclass
 import httpx
 
 from src.contracts.embedding import EmbeddingConfig, embedding_config
-from src.contracts.thresholds import RerankConfig, scoring_config
 from src.gateway.client import GatewayClient, GatewayError
+from src.gateway.model_pins import GatewayModel, drifting_models, parse_gateway_models
 from src.gateway.ollama_admin import installed_tags, is_installed
 
 
@@ -67,75 +73,92 @@ async def check_ollama_reachable(
     )
 
 
-async def check_model_installed(
-    base_url: str,
-    config: EmbeddingConfig,
-    *,
-    timeout: float = 10.0,
-    client: httpx.AsyncClient | None = None,
-) -> CheckResult:
-    wanted = config.model.tag
-    try:
-        tags = await installed_tags(base_url, timeout=timeout, client=client)
-    except httpx.HTTPError as exc:
+def check_tags_are_explicit(models: list[GatewayModel]) -> CheckResult:
+    """Every Ollama reference in the gateway config names a version.
+
+    A static check — it reads the config, not the host. It exists because a
+    drifting reference is invisible until two machines quietly disagree about
+    what `triage-model` means, and by then the divergence is weeks old.
+    """
+    name = "every gateway Ollama reference is explicitly tagged"
+    violations = [model.violation() for model in drifting_models(models)]
+    if violations:
         return CheckResult(
-            name=f"pinned model '{wanted}' installed",
+            name=name,
             ok=False,
-            detail=f"cannot reach Ollama at {base_url} ({type(exc).__name__})",
-            fix=config.install_command,
-        )
-    if not is_installed(wanted, tags):
-        return CheckResult(
-            name=f"pinned model '{wanted}' installed",
-            ok=False,
-            detail=f"not installed. Present: {', '.join(tags) or '(none)'}",
-            fix=config.install_command,
+            detail="; ".join(v for v in violations if v),
+            fix=(
+                "Write the installed, versioned tag in docker/litellm/config.yaml "
+                "(e.g. ollama/llama3.2:3b, not ollama/llama3.2). :latest is not a pin — "
+                "it moves on the next pull, so two machines can run different weights "
+                "behind the same alias."
+            ),
         )
     return CheckResult(
-        name=f"pinned model '{wanted}' installed",
+        name=name,
         ok=True,
-        detail="present",
+        detail=f"{len(models)} Ollama alias(es), all versioned",
     )
 
 
-async def check_rerank_model_installed(
+async def check_gateway_models_installed(
     base_url: str,
-    rerank: RerankConfig,
+    models: list[GatewayModel],
     *,
     timeout: float = 10.0,
     client: httpx.AsyncClient | None = None,
-) -> CheckResult:
-    """The rerank model is present on the host Ollama.
+) -> list[CheckResult]:
+    """Every Ollama-backed alias in the gateway config is installed on the host.
 
-    Only its presence is checked, not its output. Reranking has no fixed-shape
-    result to probe the way an embedding has a width, and actually invoking an
-    8B model on a CPU host would make preflight take minutes — which would get
-    it skipped, which defeats it.
+    One loop over the parsed config rather than a hardcoded list, so an alias
+    added in a later phase is covered the day it appears.
+
+    Presence only. Reranking has no fixed-shape output to probe the way an
+    embedding has a width, and invoking an 8B model on a CPU host would make
+    preflight take minutes — which would get it skipped, which defeats it. The
+    embedding model gets the deeper check separately.
     """
-    name = f"rerank model '{rerank.tag}' installed"
-    if not rerank.enabled:
-        return CheckResult(
-            name=name,
-            ok=True,
-            detail="rerank is disabled in config; scoring runs without it",
-        )
+    if not models:
+        return [
+            CheckResult(
+                name="gateway Ollama models installed",
+                ok=False,
+                detail="no Ollama aliases found in the gateway config",
+                fix="Check docker/litellm/config.yaml — model_list looks empty or unparsed.",
+            )
+        ]
+
     try:
         tags = await installed_tags(base_url, timeout=timeout, client=client)
     except httpx.HTTPError as exc:
-        return CheckResult(
-            name=name,
-            ok=False,
-            detail=f"cannot reach Ollama at {base_url} ({type(exc).__name__})",
-            fix=f"ollama pull {rerank.tag}",
-        )
-    if not is_installed(rerank.tag, tags):
-        return CheckResult(
-            name=name,
-            ok=False,
-            detail=f"not installed. Present: {', '.join(tags) or '(none)'}",
-            fix=f"ollama pull {rerank.tag}",
-        )
-    return CheckResult(name=name, ok=True, detail="present")
+        return [
+            CheckResult(
+                name=f"'{model.tag}' installed (alias {model.alias})",
+                ok=False,
+                detail=f"cannot reach Ollama at {base_url} ({type(exc).__name__})",
+                fix=model.pull_command,
+            )
+            for model in models
+        ]
+
+    # One result per DISTINCT tag: several aliases share llama3.2:3b, and
+    # repeating an identical failure four times buries the other checks.
+    results: list[CheckResult] = []
+    for tag in sorted({model.tag for model in models}):
+        sharing = sorted(model.alias for model in models if model.tag == tag)
+        label = f"'{tag}' installed (alias{'es' if len(sharing) > 1 else ''}: {', '.join(sharing)})"
+        if is_installed(tag, tags):
+            results.append(CheckResult(name=label, ok=True, detail="present"))
+        else:
+            results.append(
+                CheckResult(
+                    name=label,
+                    ok=False,
+                    detail=f"not installed. Present: {', '.join(tags) or '(none)'}",
+                    fix=f"ollama pull {tag}",
+                )
+            )
+    return results
 
 
 async def check_embedding_width(
@@ -188,7 +211,7 @@ async def run_preflight(
     env: dict[str, str],
     *,
     config: EmbeddingConfig | None = None,
-    rerank: RerankConfig | None = None,
+    models: list[GatewayModel] | None = None,
     gateway: GatewayClient | None = None,
     ollama_client_timeout: float = 10.0,
     ollama_client: httpx.AsyncClient | None = None,
@@ -200,21 +223,23 @@ async def run_preflight(
     wrong, rather than revealing the next problem only after you fix this one.
     """
     resolved = config or embedding_config()
-    resolved_rerank = rerank or scoring_config().rerank
+    resolved_models = models if models is not None else parse_gateway_models()
     base_url = ollama_base_url_for_host(env)
     gw = gateway or GatewayClient.from_env()
 
-    reachable = await check_ollama_reachable(
-        base_url, timeout=ollama_client_timeout, client=ollama_client
+    results = [
+        await check_ollama_reachable(base_url, timeout=ollama_client_timeout, client=ollama_client),
+        check_tags_are_explicit(resolved_models),
+    ]
+    results.extend(
+        await check_gateway_models_installed(
+            base_url, resolved_models, timeout=ollama_client_timeout, client=ollama_client
+        )
     )
-    installed = await check_model_installed(
-        base_url, resolved, timeout=ollama_client_timeout, client=ollama_client
-    )
-    reranker = await check_rerank_model_installed(
-        base_url, resolved_rerank, timeout=ollama_client_timeout, client=ollama_client
-    )
-    width = await check_embedding_width(gw, resolved, client=http_client)
-    return [reachable, installed, reranker, width]
+    # The embedding model is the one alias with a deeper check: its output has a
+    # fixed width that the Neo4j index depends on, and a mismatch is silent.
+    results.append(await check_embedding_width(gw, resolved, client=http_client))
+    return results
 
 
 def format_report(results: list[CheckResult]) -> str:

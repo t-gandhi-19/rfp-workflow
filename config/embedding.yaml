@@ -16,7 +16,7 @@ model:
   alias: embed-model
   # The concrete Ollama tag the alias must resolve to. Must match the
   # `embed-model` entry in docker/litellm/config.yaml.
-  tag: nomic-embed-text
+  tag: nomic-embed-text:v1.5
   # Asserted by a real probe embedding in preflight, not assumed from docs.
   dimensions: 768
 
@@ -28,4 +28,4 @@ index:
 
 # Printed verbatim by preflight when the model is missing, so the fix needs no
 # interpretation.
-install_command: ollama pull nomic-embed-text
+install_command: ollama pull nomic-embed-text:v1.5

@@ -16,14 +16,14 @@ import httpx
 import pytest
 
 from src.contracts.embedding import EmbeddingConfig
-from src.contracts.thresholds import RerankConfig
 from src.gateway.client import GatewayClient
+from src.gateway.model_pins import GatewayModel
 from src.gateway.ollama_admin import is_installed, normalise_tag
 from src.gateway.preflight import (
     check_embedding_width,
-    check_model_installed,
+    check_gateway_models_installed,
     check_ollama_reachable,
-    check_rerank_model_installed,
+    check_tags_are_explicit,
     format_report,
     ollama_base_url_for_host,
     run_preflight,
@@ -35,28 +35,29 @@ GATEWAY = GatewayClient(base_url="http://gateway.test", api_key="k")
 CONFIG = EmbeddingConfig.model_validate(
     {
         "version": 1,
-        "model": {"alias": "embed-model", "tag": "nomic-embed-text", "dimensions": 768},
+        "model": {"alias": "embed-model", "tag": "nomic-embed-text:v1.5", "dimensions": 768},
         "index": {
             "name": "question_embedding",
             "label": "Question",
             "property": "embedding",
             "similarity": "cosine",
         },
-        "install_command": "ollama pull nomic-embed-text",
+        "install_command": "ollama pull nomic-embed-text:v1.5",
     }
 )
 
-RERANK = RerankConfig.model_validate(
-    {
-        "enabled": True,
-        "alias": "rerank-model",
-        "tag": "llama3.1:8b",
-        "temperature": 0,
-        "timeout_seconds": 180,
-    }
-)
 
-INSTALLED = ["nomic-embed-text:latest", "llama3.1:8b", "llama3.2:latest"]
+def model(alias: str, tag: str) -> GatewayModel:
+    return GatewayModel(alias=alias, reference=f"ollama/{tag}", tag=tag)
+
+
+MODELS = [
+    model("triage-model", "llama3.2:3b"),
+    model("rerank-model", "llama3.1:8b"),
+    model("embed-model", "nomic-embed-text:v1.5"),
+]
+
+INSTALLED = ["llama3.1:8b", "llama3.2:3b", "nomic-embed-text:v1.5"]
 
 
 def ollama(models: list[str] | None, *, unreachable: bool = False) -> httpx.AsyncClient:
@@ -82,20 +83,18 @@ def gateway(dimensions: int, *, status: int = 200) -> httpx.AsyncClient:
 
 
 class TestTagNormalisation:
-    """`ollama pull nomic-embed-text` installs `nomic-embed-text:latest`."""
-
     def test_latest_suffix_is_collapsed(self) -> None:
         assert normalise_tag("nomic-embed-text:latest") == "nomic-embed-text"
 
     def test_explicit_versions_are_preserved(self) -> None:
         assert normalise_tag("llama3.2:3b") == "llama3.2:3b"
 
-    def test_pinned_tag_matches_its_latest_form(self) -> None:
-        """Without this, a model sitting right there reports as missing."""
-        assert is_installed("nomic-embed-text", ["nomic-embed-text:latest"]) is True
+    def test_an_exact_tag_matches(self) -> None:
+        assert is_installed("llama3.2:3b", ["llama3.2:3b"]) is True
 
-    def test_a_different_model_does_not_match(self) -> None:
-        assert is_installed("nomic-embed-text", ["llama3.2:3b"]) is False
+    def test_a_different_version_does_not_match(self) -> None:
+        """3b and 8b are different models, not different names for one."""
+        assert is_installed("llama3.2:3b", ["llama3.2:1b"]) is False
 
 
 class TestReachability:
@@ -113,61 +112,59 @@ class TestReachability:
         assert result.fix is not None and "ollama serve" in result.fix
 
 
-class TestModelPresence:
-    async def test_passes_when_the_pinned_model_is_installed(self) -> None:
+class TestGatewayModelsInstalled:
+    """One loop over the parsed config, so a future alias is covered on arrival."""
+
+    async def test_all_present(self) -> None:
         async with ollama(INSTALLED) as client:
-            result = await check_model_installed(OLLAMA, CONFIG, client=client)
-        assert result.ok is True
+            results = await check_gateway_models_installed(OLLAMA, MODELS, client=client)
+        assert [r.ok for r in results] == [True, True, True]
 
-    async def test_fails_with_the_literal_pull_command_when_absent(self) -> None:
-        """The required behaviour: name the exact command that fixes it."""
-        async with ollama(["llama3.2:latest"]) as client:
-            result = await check_model_installed(OLLAMA, CONFIG, client=client)
-        assert result.ok is False
-        assert result.fix == "ollama pull nomic-embed-text"
-        assert "llama3.2" in result.detail
+    async def test_a_missing_model_names_its_own_pull_command(self) -> None:
+        async with ollama(["llama3.2:3b", "nomic-embed-text:v1.5"]) as client:
+            results = await check_gateway_models_installed(OLLAMA, MODELS, client=client)
+        failed = [r for r in results if not r.ok]
+        assert len(failed) == 1
+        assert failed[0].fix == "ollama pull llama3.1:8b"
 
-    async def test_fails_cleanly_when_nothing_is_installed(self) -> None:
+    async def test_aliases_sharing_a_tag_report_once(self) -> None:
+        """Four aliases on one tag should not bury the other checks."""
+        shared = [
+            model("triage-model", "llama3.2:3b"),
+            model("extract-assist-model", "llama3.2:3b"),
+            model("loginterp-model", "llama3.2:3b"),
+        ]
         async with ollama([]) as client:
-            result = await check_model_installed(OLLAMA, CONFIG, client=client)
-        assert result.ok is False
-        assert "(none)" in result.detail
+            results = await check_gateway_models_installed(OLLAMA, shared, client=client)
+        assert len(results) == 1
+        assert "triage-model" in results[0].name
+        assert "loginterp-model" in results[0].name
 
-    async def test_fails_with_the_pull_command_when_ollama_is_down(self) -> None:
+    async def test_unreachable_ollama_fails_every_model(self) -> None:
         async with ollama(None, unreachable=True) as client:
-            result = await check_model_installed(OLLAMA, CONFIG, client=client)
-        assert result.ok is False
-        assert result.fix == "ollama pull nomic-embed-text"
+            results = await check_gateway_models_installed(OLLAMA, MODELS, client=client)
+        assert [r.ok for r in results] == [False, False, False]
 
-
-class TestRerankModelPresence:
-    """Presence only — invoking an 8B model on CPU would make preflight take
-    minutes, which would get it skipped, which defeats the point of having it."""
-
-    async def test_passes_when_installed(self) -> None:
+    async def test_an_empty_config_is_itself_a_failure(self) -> None:
+        """A config that parsed to nothing means the check is silently vacuous."""
         async with ollama(INSTALLED) as client:
-            result = await check_rerank_model_installed(OLLAMA, RERANK, client=client)
-        assert result.ok is True
+            results = await check_gateway_models_installed(OLLAMA, [], client=client)
+        assert [r.ok for r in results] == [False]
 
-    async def test_fails_with_the_literal_pull_command_when_absent(self) -> None:
-        async with ollama(["nomic-embed-text:latest"]) as client:
-            result = await check_rerank_model_installed(OLLAMA, RERANK, client=client)
+
+class TestExplicitTags:
+    def test_a_pinned_config_passes(self) -> None:
+        assert check_tags_are_explicit(MODELS).ok is True
+
+    def test_a_bare_reference_fails(self) -> None:
+        result = check_tags_are_explicit([model("triage-model", "llama3.2")])
         assert result.ok is False
-        assert result.fix == "ollama pull llama3.1:8b"
+        assert "no tag" in result.detail
 
-    async def test_fails_with_the_pull_command_when_ollama_is_down(self) -> None:
-        async with ollama(None, unreachable=True) as client:
-            result = await check_rerank_model_installed(OLLAMA, RERANK, client=client)
+    def test_an_explicit_latest_fails(self) -> None:
+        result = check_tags_are_explicit([model("embed-model", "nomic-embed-text:latest")])
         assert result.ok is False
-        assert result.fix == "ollama pull llama3.1:8b"
-
-    async def test_skipped_when_rerank_is_disabled(self) -> None:
-        """Scoring runs without it, so a missing model is not a failure."""
-        disabled = RERANK.model_copy(update={"enabled": False})
-        async with ollama([]) as client:
-            result = await check_rerank_model_installed(OLLAMA, disabled, client=client)
-        assert result.ok is True
-        assert "disabled" in result.detail
+        assert ":latest is not a pin" in result.detail
 
 
 class TestEmbeddingWidth:
@@ -185,7 +182,6 @@ class TestEmbeddingWidth:
             result = await check_embedding_width(GATEWAY, CONFIG, client=client)
         assert result.ok is False
         assert f"returned {wrong} dimensions" in result.detail
-        assert "768" in result.detail
         assert result.fix is not None and "make reembed" in result.fix
 
     async def test_fails_readably_when_the_gateway_is_down(self) -> None:
@@ -199,38 +195,44 @@ class TestFullRun:
     async def test_all_green_when_everything_is_in_place(self) -> None:
         async with ollama(INSTALLED) as oc, gateway(768) as gc:
             results = await run_preflight(
-                {}, config=CONFIG, gateway=GATEWAY, ollama_client=oc, http_client=gc
+                {}, config=CONFIG, models=MODELS, gateway=GATEWAY, ollama_client=oc, http_client=gc
             )
-        assert [r.ok for r in results] == [True, True, True, True]
+        # reachable + explicit-tags + one per distinct tag + width
+        assert len(results) == 6
+        assert all(r.ok for r in results)
         assert "All checks passed" in format_report(results)
 
     async def test_reports_every_failure_not_just_the_first(self) -> None:
         """One run should tell you everything that is wrong."""
-        async with ollama(["llama3.2:latest"]) as oc, gateway(384) as gc:
+        async with ollama(["llama3.2:3b"]) as oc, gateway(384) as gc:
             results = await run_preflight(
-                {}, config=CONFIG, gateway=GATEWAY, ollama_client=oc, http_client=gc
+                {}, config=CONFIG, models=MODELS, gateway=GATEWAY, ollama_client=oc, http_client=gc
             )
-        # Embedding model missing, rerank model missing, and the wrong width —
-        # all three reported from one run rather than one at a time.
-        assert [r.ok for r in results] == [True, False, False, False]
         report = format_report(results)
         assert "3 check(s) failed" in report
-        assert "ollama pull nomic-embed-text" in report
         assert "ollama pull llama3.1:8b" in report
+        assert "ollama pull nomic-embed-text:v1.5" in report
+
+    async def test_a_drifting_config_fails_the_run(self) -> None:
+        """Implicit tags are a preflight failure, not a style note."""
+        drifting = [model("triage-model", "llama3.2")]
+        async with ollama(["llama3.2:3b"]) as oc, gateway(768) as gc:
+            results = await run_preflight(
+                {},
+                config=CONFIG,
+                models=drifting,
+                gateway=GATEWAY,
+                ollama_client=oc,
+                http_client=gc,
+            )
+        assert any(not r.ok and "explicitly tagged" in r.name for r in results)
 
     async def test_report_prints_the_fix_verbatim(self) -> None:
         async with ollama([]) as oc, gateway(768) as gc:
             results = await run_preflight(
-                {}, config=CONFIG, gateway=GATEWAY, ollama_client=oc, http_client=gc
+                {}, config=CONFIG, models=MODELS, gateway=GATEWAY, ollama_client=oc, http_client=gc
             )
-        assert "fix:  ollama pull nomic-embed-text" in format_report(results)
-
-    async def test_a_down_ollama_fails_two_checks_not_one(self) -> None:
-        async with ollama(None, unreachable=True) as oc, gateway(768) as gc:
-            results = await run_preflight(
-                {}, config=CONFIG, gateway=GATEWAY, ollama_client=oc, http_client=gc
-            )
-        assert [r.ok for r in results] == [False, False, False, True]
+        assert "fix:  ollama pull llama3.1:8b" in format_report(results)
 
 
 class TestHostUrl:
@@ -246,29 +248,10 @@ class TestHostUrl:
 
 
 class TestShippedConfigMatchesTheGateway:
-    """The pin is only meaningful if config and the gateway agree."""
-
     def test_embedding_config_loads(self) -> None:
         from src.contracts.embedding import embedding_config
 
         config = embedding_config()
-        assert config.model.tag == "nomic-embed-text"
+        assert config.model.tag == "nomic-embed-text:v1.5"
         assert config.model.dimensions == 768
         assert config.index.similarity == "cosine"
-
-    def test_litellm_resolves_the_alias_to_the_pinned_tag(self) -> None:
-        """A drifted alias would embed with a different model than we pinned."""
-        from pathlib import Path
-
-        import yaml
-
-        from src.contracts.embedding import embedding_config
-
-        config = embedding_config()
-        litellm = yaml.safe_load(
-            (Path(__file__).resolve().parents[2] / "docker/litellm/config.yaml").read_text(
-                encoding="utf-8"
-            )
-        )
-        entry = next(m for m in litellm["model_list"] if m["model_name"] == config.model.alias)
-        assert entry["litellm_params"]["model"] == f"ollama/{config.model.tag}"

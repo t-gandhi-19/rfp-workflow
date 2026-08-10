@@ -14,12 +14,12 @@ model_list:
   # ---- local, via Ollama on the host -------------------------------------
   - model_name: triage-model
     litellm_params:
-      model: ollama/llama3.2
+      model: ollama/llama3.2:3b
       api_base: os.environ/OLLAMA_BASE_URL
 
   - model_name: extract-assist-model
     litellm_params:
-      model: ollama/llama3.2
+      model: ollama/llama3.2:3b
       api_base: os.environ/OLLAMA_BASE_URL
 
   # Pinned to the 8B tier: reranking is the one local step whose judgement
@@ -34,14 +34,14 @@ model_list:
 
   - model_name: loginterp-model
     litellm_params:
-      model: ollama/llama3.2
+      model: ollama/llama3.2:3b
       api_base: os.environ/OLLAMA_BASE_URL
 
   # Pinned at 768 dimensions to match the Neo4j vector index. Changing this
   # model means reindexing — hence `make reembed` exists from day one.
   - model_name: embed-model
     litellm_params:
-      model: ollama/nomic-embed-text
+      model: ollama/nomic-embed-text:v1.5
       api_base: os.environ/OLLAMA_BASE_URL
 
   # ---- Groq: the two quality-critical steps ------------------------------
