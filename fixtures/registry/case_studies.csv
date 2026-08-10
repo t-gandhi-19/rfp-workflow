@@ -1,0 +1,7 @@
+code,title,customer,domain,publicly_usable,summary
+CST-0001,Insurance core platform migration,Meridian Insurance Group,cloud_migration,true,Migrated 240 workloads to AWS across four waves with zero unplanned downtime.
+CST-0002,Retail data-centre exit,Northfield Retail Co,cloud_migration,true,"Closed two data centres in fourteen months, retiring 900 physical hosts."
+CST-0003,Manufacturing ERP replatform,Helvetia Manufacturing AG,cloud_migration,true,Replatformed a regional ERP estate to Azure with a 6R disposition per workload.
+CST-0004,Logistics landing-zone rebuild,Calder Freight Holdings,cloud_migration,true,Rebuilt a non-compliant landing zone into a guardrailed multi-account structure.
+CST-0005,Health records platform migration,Bluepine Health Systems,cloud_migration,false,Migrated a regulated records platform under a customer confidentiality agreement.
+CST-0006,Banking DR reconstruction,Kestrel Financial Partners,cloud_migration,false,Rebuilt disaster recovery for a regulated banking estate; client name withheld.

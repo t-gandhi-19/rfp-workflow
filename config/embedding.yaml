@@ -1,0 +1,31 @@
+# The embedding model and the vector index are ONE decision, so they are written
+# down in one place.
+#
+# Neo4j's vector index is created with a fixed dimension. Change the model to one
+# with a different width and every existing embedding becomes unindexable; change
+# it to one of the same width and the vectors are silently incomparable, which is
+# worse because nothing errors — retrieval just quietly gets bad.
+#
+# So: `make preflight` asserts the pinned tag is the model actually installed and
+# that it really returns `dimensions` values, `make ingest` refuses to run until
+# that passes, and `make reembed` exists for when this file legitimately changes.
+version: 1
+
+model:
+  # The gateway alias application code names. Never a raw model name in Python.
+  alias: embed-model
+  # The concrete Ollama tag the alias must resolve to. Must match the
+  # `embed-model` entry in docker/litellm/config.yaml.
+  tag: nomic-embed-text
+  # Asserted by a real probe embedding in preflight, not assumed from docs.
+  dimensions: 768
+
+index:
+  name: question_embedding
+  label: Question
+  property: embedding
+  similarity: cosine
+
+# Printed verbatim by preflight when the model is missing, so the fix needs no
+# interpretation.
+install_command: ollama pull nomic-embed-text

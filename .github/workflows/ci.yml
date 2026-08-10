@@ -65,19 +65,24 @@ jobs:
           enable-cache: true
       - run: uv python install ${{ env.PYTHON_VERSION }}
       - run: uv sync --frozen --group dev
-      - name: Unit tests — contracts and validators
+      - name: Unit tests — contracts, validators, fixtures, extraction
         run: uv run pytest tests/unit -q
       - name: Security tests — submitter, SQL interpolation, provider SDKs
         run: uv run pytest tests/security -q
+      - name: Fixtures match a fresh generation
+        run: uv run python -m scripts.generate_fixtures --check
 
   # ---------------------------------------------------------------------------
-  # Live stack: real Keycloak, real Postgres, real write-api.
+  # Live stack: real Keycloak, real Postgres, real Neo4j, real write-api.
   #
-  # Only the services Phase 1 exercises are started. Langfuse, Neo4j, and
-  # LiteLLM are defined in compose and verified locally, but starting them here
-  # would add several minutes and gigabytes to every push for no coverage —
-  # nothing in Phase 1 touches them. They join this job in the phase that uses
-  # them. Ollama is never started in CI (CLAUDE.md rule 26).
+  # Neo4j joins the list this phase — the graph queries and the vector index
+  # earn its startup cost now. Langfuse and LiteLLM stay out until the phase
+  # that uses them.
+  #
+  # Ollama is never started in CI (CLAUDE.md rule 26), so ingest runs with
+  # RFP_FAKE_EMBEDDINGS=1. Those vectors exercise the plumbing — ingest, the
+  # index, query shape, idempotency — and say nothing about retrieval quality,
+  # which is measured against real embeddings in Phase 3.
   # ---------------------------------------------------------------------------
   smoke:
     name: compose smoke
@@ -98,21 +103,46 @@ jobs:
           # parseable if it is ever added to the service list here.
           sed -i 's|^GROQ_API_KEY=$|GROQ_API_KEY=gsk-ci-placeholder|' .env
 
-      - name: Start postgres, keycloak, write-api
+      - name: Start postgres, keycloak, neo4j, write-api
         run: |
           set -a && source .env && set +a
           docker compose --profile infra --profile app up -d --wait \
-            postgres keycloak write-api
+            postgres keycloak neo4j write-api
 
       - name: Show service status
         if: always()
         run: docker compose --profile infra --profile app ps
+
+      - name: Apply graph schema (twice — it must be idempotent)
+        run: |
+          set -a && source .env && set +a
+          export NEO4J_URI=bolt://localhost:${NEO4J_BOLT_PORT_HOST:-7687}
+          uv run python -m scripts.apply_schema
+          uv run python -m scripts.apply_schema
+
+      - name: Ingest fixtures with the deterministic stand-in embedder
+        run: |
+          set -a && source .env && set +a
+          export NEO4J_URI=bolt://localhost:${NEO4J_BOLT_PORT_HOST:-7687}
+          export RFP_FAKE_EMBEDDINGS=1
+          uv run python -m scripts.ingest > /tmp/ingest-first.json
+          uv run python -m scripts.ingest > /tmp/ingest-second.json
+          python - <<'PY'
+          import json
+          first = json.load(open("/tmp/ingest-first.json"))
+          second = json.load(open("/tmp/ingest-second.json"))
+          for key in ("nodes", "relationships", "by_label", "by_relationship"):
+              assert first[key] == second[key], f"ingest is not idempotent: {key} changed"
+          assert second["questions_embedded"] == 0, "re-ingest re-embedded existing questions"
+          print(f"ingest idempotent: {first['nodes']} nodes, {first['relationships']} relationships")
+          PY
 
       - name: Integration tests
         run: |
           set -a && source .env && set +a
           export KEYCLOAK_BASE=http://localhost:${KEYCLOAK_PORT_HOST:-8080}
           export WRITE_API_BASE=http://localhost:${WRITE_API_PORT:-8001}
+          export NEO4J_URI=bolt://localhost:${NEO4J_BOLT_PORT_HOST:-7687}
           uv run pytest tests/integration -q -m integration
 
       - name: Confirm the write actually landed in Postgres

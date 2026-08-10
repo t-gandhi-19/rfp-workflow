@@ -64,6 +64,11 @@
         "composite": false
       },
       {
+        "name": "eval-writer",
+        "description": "Write eval results through write-api. Held by evals-sa alone, so the harness cannot also write drafts.",
+        "composite": false
+      },
+      {
         "name": "log-reader",
         "description": "Read run logs and traces. No write path anywhere.",
         "composite": false
@@ -412,7 +417,7 @@
       "username": "service-account-assembler-sa",
       "enabled": true,
       "serviceAccountClientId": "assembler-sa",
-      "realmRoles": ["rfp-reader", "kg-reader", "draft-writer"]
+      "realmRoles": ["rfp-reader", "draft-writer"]
     },
     {
       "username": "service-account-ingest-sa",
@@ -424,7 +429,7 @@
       "username": "service-account-evals-sa",
       "enabled": true,
       "serviceAccountClientId": "evals-sa",
-      "realmRoles": ["rfp-reader", "kg-reader", "draft-writer"]
+      "realmRoles": ["rfp-reader", "kg-reader", "eval-writer"]
     },
     {
       "username": "service-account-dashboard-sa",

@@ -40,7 +40,9 @@ build: check-env ## Build application images
 
 .PHONY: up
 up: check-env ## Bring up the whole stack (infra + app) and wait for health
-	GIT_SHA=$(GIT_SHA) $(COMPOSE) $(INFRA) $(APP) up -d --wait
+	# --build so a source change is never silently served by a stale image.
+	# Layer caching makes the no-change case near-free.
+	GIT_SHA=$(GIT_SHA) $(COMPOSE) $(INFRA) $(APP) up -d --wait --build
 	@echo
 	@echo "Stack is up:"
 	@echo "  Keycloak   http://localhost:8080  (realm: rfp)"
@@ -76,6 +78,8 @@ ps: ## Show service status
 # Run from the host, so Postgres is reached on the published port rather than
 # by its compose service name.
 HOST_PG = POSTGRES_HOST=localhost POSTGRES_PORT=$${POSTGRES_PORT_HOST:-5432}
+HOST_NEO4J = NEO4J_URI=bolt://localhost:$${NEO4J_BOLT_PORT_HOST:-7687} \
+             LITELLM_BASE_URL_HOST=$${LITELLM_BASE_URL_HOST:-http://localhost:$${LITELLM_PORT_HOST:-4000}}
 
 .PHONY: migrate
 migrate: check-env ## Apply Alembic migrations (idempotent)
@@ -103,6 +107,21 @@ test-integration: check-env ## Run integration tests (requires 'make up')
 .PHONY: test-all
 test-all: test test-integration ## Run every test
 
+.PHONY: test-report
+test-report: ## Per-suite verbatim pytest summaries + the SHA they were produced at
+	@# Every PR quotes this output verbatim. Reproducing the numbers by hand
+	@# invites remembering them wrong, so the report is generated, never typed.
+	@echo "commit:    $$(git rev-parse HEAD)"
+	@echo "short SHA: $$(git rev-parse --short HEAD)"
+	@echo "worktree:  $$(git status --porcelain | wc -l | tr -d ' ') uncommitted path(s)"
+	@set -a; [ -f .env ] && . ./.env; set +a; \
+	export KEYCLOAK_BASE=$${KEYCLOAK_BASE:-http://localhost:$${KEYCLOAK_PORT_HOST:-8080}}; \
+	export WRITE_API_BASE=$${WRITE_API_BASE:-http://localhost:$${WRITE_API_PORT:-8001}}; \
+	for suite in unit security integration; do \
+		printf '\n### tests/%s\n' "$$suite"; \
+		$(RUN) pytest tests/$$suite -q 2>&1 | tail -1; \
+	done
+
 .PHONY: lint
 lint: ## ruff check + format check + mypy
 	$(RUN) ruff check .
@@ -123,13 +142,32 @@ define phase_gate
 	@exit 1
 endef
 
+.PHONY: preflight
+preflight: check-env ## Verify the embedding path before anything writes to the graph
+	@set -a && source .env && set +a && \
+		OLLAMA_BASE_URL_HOST=$${OLLAMA_BASE_URL_HOST:-http://localhost:11434} \
+		LITELLM_BASE_URL_HOST=$${LITELLM_BASE_URL_HOST:-http://localhost:$${LITELLM_PORT_HOST:-4000}} \
+		$(RUN) python -m scripts.preflight
+
+.PHONY: apply-schema
+apply-schema: check-env ## Apply the Neo4j schema (idempotent)
+	@set -a && source .env && set +a && $(HOST_NEO4J) $(RUN) python -m scripts.apply_schema
+
+.PHONY: fixtures
+fixtures: ## Regenerate the synthetic fixtures
+	$(RUN) python -m scripts.generate_fixtures
+
+.PHONY: fixtures-check
+fixtures-check: ## Verify committed fixtures match a fresh generation
+	$(RUN) python -m scripts.generate_fixtures --check
+
 .PHONY: ingest
-ingest: ## (Phase 2) Load synthetic fixtures into the graph
-	$(call phase_gate,ingest,2,Needs the graph schema and the synthetic corpus.)
+ingest: preflight apply-schema ## Load synthetic fixtures into the graph (preflight first)
+	@set -a && source .env && set +a && $(HOST_NEO4J) $(RUN) python -m scripts.ingest
 
 .PHONY: reembed
-reembed: ## (Phase 2) Re-embed the corpus after an embedding-model change
-	$(call phase_gate,reembed,2,Needs ingest and the pinned embedding model.)
+reembed: preflight ## Recompute every embedding after an embedding-model change
+	@set -a && source .env && set +a && $(HOST_NEO4J) $(RUN) python -m scripts.ingest --reembed
 
 .PHONY: evals
 evals: ## (Phase 3) Run the eval harness and write the HTML report

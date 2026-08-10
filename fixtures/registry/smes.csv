@@ -1,0 +1,7 @@
+id,name,role,capabilities
+SME-0001,Priya Raghunathan,Principal Migration Architect,CAP-0001|CAP-0003
+SME-0002,Tomas Lindqvist,Landing Zone Lead,CAP-0002
+SME-0003,Adaeze Okonkwo,Data Migration Lead,CAP-0004
+SME-0004,Marcus Feldman,Security and Compliance Lead,CAP-0005
+SME-0005,Yuki Tanaka,FinOps and Operations Lead,CAP-0006
+SME-0006,Rosa Delgado,Delivery Director,CAP-0001|CAP-0006

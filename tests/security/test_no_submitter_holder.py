@@ -22,19 +22,24 @@ REALM_PATH = Path(__file__).resolve().parents[2] / "docker" / "keycloak" / "real
 SUBMITTER = "submitter"
 
 # Every service account and the realm roles it is entitled to. Derived from the
-# tool-to-role table (build prompt §11) and the role holders in §16:
-#   - a role appears here only if some tool or endpoint the account calls needs it
-#   - evals-sa holds draft-writer by explicit decision, to write eval results
-#     through write-api rather than reaching into Postgres directly
+# tool-to-role table (build prompt §11) and the role holders in §16. A role
+# appears here only if some tool or endpoint the account actually calls needs it.
+#
+# Two grants were narrowed after the Phase 1 review:
+#   - evals-sa holds `eval-writer`, not `draft-writer`. The harness records
+#     metrics; it has no business writing an answer.
+#   - assembler-sa holds no `kg-reader`. The assembler is deterministic and
+#     reads nothing from the graph. If a later phase needs it, that phase
+#     argues for it.
 EXPECTED_REALM_ROLES: dict[str, set[str]] = {
     "triage-sa": {"rfp-reader"},
     "extractor-sa": {"rfp-reader"},
     "retriever-sa": {"rfp-reader", "kg-reader"},
     "drafter-sa": {"rfp-reader", "kg-reader", "draft-writer"},
     "critic-sa": {"rfp-reader", "kg-reader"},
-    "assembler-sa": {"rfp-reader", "kg-reader", "draft-writer"},
+    "assembler-sa": {"rfp-reader", "draft-writer"},
     "ingest-sa": {"kg-reader", "kg-writer"},
-    "evals-sa": {"rfp-reader", "kg-reader", "draft-writer"},
+    "evals-sa": {"rfp-reader", "kg-reader", "eval-writer"},
     "dashboard-sa": {"rfp-reader", "log-reader", "view-events"},
     "loginterp-sa": {"rfp-reader", "log-reader"},
 }
@@ -115,13 +120,29 @@ class TestServiceAccounts:
         }
         assert actual == EXPECTED_REALM_ROLES
 
-    def test_kg_writer_is_held_only_by_ingest(self, realm: dict[str, Any]) -> None:
-        holders = {
+    def _holders_of(self, realm: dict[str, Any], role: str) -> set[str]:
+        return {
             user["serviceAccountClientId"]
             for user in _users(realm)
-            if "kg-writer" in user.get("realmRoles", [])
+            if role in user.get("realmRoles", [])
         }
-        assert holders == {"ingest-sa"}
+
+    def test_kg_writer_is_held_only_by_ingest(self, realm: dict[str, Any]) -> None:
+        assert self._holders_of(realm, "kg-writer") == {"ingest-sa"}
+
+    def test_eval_writer_is_held_only_by_the_harness(self, realm: dict[str, Any]) -> None:
+        assert self._holders_of(realm, "eval-writer") == {"evals-sa"}
+
+    def test_the_harness_cannot_write_drafts(self, realm: dict[str, Any]) -> None:
+        """The whole point of splitting eval-writer out of draft-writer."""
+        assert "evals-sa" not in self._holders_of(realm, "draft-writer")
+
+    def test_draft_writer_is_confined_to_who_produces_answers(self, realm: dict[str, Any]) -> None:
+        assert self._holders_of(realm, "draft-writer") == {"drafter-sa", "assembler-sa"}
+
+    def test_the_assembler_reads_nothing_from_the_graph(self, realm: dict[str, Any]) -> None:
+        """The assembler is deterministic template filling — it needs no graph access."""
+        assert "assembler-sa" not in self._holders_of(realm, "kg-reader")
 
     @pytest.mark.parametrize("client_id", sorted(EXPECTED_REALM_ROLES))
     def test_accounts_are_client_credentials_only(

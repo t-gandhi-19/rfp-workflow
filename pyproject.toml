@@ -10,10 +10,10 @@ readme = "README.md"
 requires-python = "==3.12.*"
 license = { text = "MIT" }
 
-# Phase 1 dependency set only. Later phases add their own (Phase 2: neo4j,
-# pdfplumber, python-docx, pytesseract; Phase 4: crewai, opentelemetry, openlit;
-# Phase 6: streamlit). Keeping this lean keeps CI and image builds fast.
+# Phases 1-2. Later phases add their own (Phase 4: crewai, opentelemetry,
+# openlit; Phase 6: streamlit). Keeping this lean keeps CI and image builds fast.
 dependencies = [
+    # Phase 1
     "pydantic>=2.10,<3",
     "pydantic-settings>=2.7,<3",
     "fastapi>=0.115,<1",
@@ -24,6 +24,13 @@ dependencies = [
     "pyjwt[crypto]>=2.10,<3",
     "httpx>=0.28,<1",
     "pyyaml>=6.0,<7",
+    # Phase 2 — graph, fixtures, extraction
+    "neo4j>=5.27,<6",
+    "pdfplumber>=0.11,<1",
+    "python-docx>=1.1,<2",
+    "pytesseract>=0.3.13,<1",
+    "pillow>=11.0,<12",
+    "reportlab>=4.2,<5",
 ]
 
 [dependency-groups]
@@ -71,7 +78,11 @@ select = [
     "S",      # flake8-bandit
 ]
 ignore = [
-    "S104",  # binding 0.0.0.0 is intended inside containers
+    "S104",      # binding 0.0.0.0 is intended inside containers
+    # ASYNC109 warns against hand-rolled `timeout` parameters. Ours are forwarded
+    # straight to httpx, which implements the timeout properly; replacing them
+    # with asyncio.timeout would wrap a correct implementation in a second one.
+    "ASYNC109",
 ]
 
 [tool.ruff.lint.isort]
@@ -113,6 +124,18 @@ no_implicit_reexport = true
 extra_checks = true
 
 [[tool.mypy.overrides]]
+# Document and PDF libraries ship no type information. They are used only at the
+# edges (fixture rendering, text extraction) and their results are immediately
+# validated into contracts, so the untyped boundary is short and bounded.
+module = [
+    "docx.*",
+    "pdfplumber.*",
+    "pytesseract.*",
+    "reportlab.*",
+]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
 # Test helpers may take loosely-typed kwargs to build invalid payloads on
 # purpose; the tests themselves are still fully annotated.
 module = ["tests.*"]
@@ -125,7 +148,10 @@ warn_return_any = false
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
-addopts = "-q --strict-markers"
+# No -q here: combined with a -q on the command line it becomes -qq, which
+# suppresses the "N passed, M skipped in Xs" summary line that every PR must
+# quote verbatim.
+addopts = "--strict-markers"
 markers = [
     "integration: requires the docker compose stack to be running",
 ]
