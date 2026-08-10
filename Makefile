@@ -161,6 +161,14 @@ fixtures: ## Regenerate the synthetic fixtures
 fixtures-check: ## Verify committed fixtures match a fresh generation
 	$(RUN) python -m scripts.generate_fixtures --check
 
+.PHONY: validate-manual-key
+validate-manual-key: ## Validate the hand-written answer key (structure + cross-refs)
+	$(RUN) python -m scripts.validate_manual_key
+
+.PHONY: manual-key-schema
+manual-key-schema: ## Regenerate the manual answer key's JSON Schema from the model
+	$(RUN) python -m scripts.validate_manual_key --emit-schema
+
 .PHONY: ingest
 ingest: preflight apply-schema ## Load synthetic fixtures into the graph (preflight first)
 	@set -a && source .env && set +a && $(HOST_NEO4J) $(RUN) python -m scripts.ingest
