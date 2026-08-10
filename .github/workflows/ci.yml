@@ -1,0 +1,145 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  UV_VERSION: "0.5.11"
+  PYTHON_VERSION: "3.12"
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Secret scanning gates the merge (CLAUDE.md rule 16).
+  # ---------------------------------------------------------------------------
+  secrets:
+    name: gitleaks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Scan for committed secrets
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # ---------------------------------------------------------------------------
+  # Lint and types. mypy is strict on contracts/ and graph/.
+  # ---------------------------------------------------------------------------
+  quality:
+    name: ruff + mypy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+      - run: uv python install ${{ env.PYTHON_VERSION }}
+      - run: uv sync --frozen --group dev
+      - name: ruff check
+        run: uv run ruff check --output-format=github .
+      - name: ruff format
+        run: uv run ruff format --check .
+      - name: mypy
+        run: uv run mypy src tests
+
+  # ---------------------------------------------------------------------------
+  # Unit and security suites. No network, no models, no database.
+  # ---------------------------------------------------------------------------
+  tests:
+    name: unit + security
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+      - run: uv python install ${{ env.PYTHON_VERSION }}
+      - run: uv sync --frozen --group dev
+      - name: Unit tests — contracts and validators
+        run: uv run pytest tests/unit -q
+      - name: Security tests — submitter, SQL interpolation, provider SDKs
+        run: uv run pytest tests/security -q
+
+  # ---------------------------------------------------------------------------
+  # Live stack: real Keycloak, real Postgres, real write-api.
+  #
+  # Only the services Phase 1 exercises are started. Langfuse, Neo4j, and
+  # LiteLLM are defined in compose and verified locally, but starting them here
+  # would add several minutes and gigabytes to every push for no coverage —
+  # nothing in Phase 1 touches them. They join this job in the phase that uses
+  # them. Ollama is never started in CI (CLAUDE.md rule 26).
+  # ---------------------------------------------------------------------------
+  smoke:
+    name: compose smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+      - run: uv python install ${{ env.PYTHON_VERSION }}
+      - run: uv sync --frozen --group dev
+
+      - name: Prepare .env
+        run: |
+          cp .env.example .env
+          # No model is called in this job; a placeholder keeps LiteLLM's config
+          # parseable if it is ever added to the service list here.
+          sed -i 's|^GROQ_API_KEY=$|GROQ_API_KEY=gsk-ci-placeholder|' .env
+
+      - name: Start postgres, keycloak, write-api
+        run: |
+          set -a && source .env && set +a
+          docker compose --profile infra --profile app up -d --wait \
+            postgres keycloak write-api
+
+      - name: Show service status
+        if: always()
+        run: docker compose --profile infra --profile app ps
+
+      - name: Integration tests
+        run: |
+          set -a && source .env && set +a
+          export KEYCLOAK_BASE=http://localhost:${KEYCLOAK_PORT_HOST:-8080}
+          export WRITE_API_BASE=http://localhost:${WRITE_API_PORT:-8001}
+          uv run pytest tests/integration -q -m integration
+
+      - name: Confirm the write actually landed in Postgres
+        run: |
+          set -a && source .env && set +a
+          count=$(docker compose exec -T postgres \
+            psql -U "$POSTGRES_SUPERUSER" -d "$POSTGRES_DB" -tAc \
+            "SELECT count(*) FROM runs WHERE run_id = 'run-integration-001';")
+          test "$count" = "1" || { echo "expected 1 run row, found '$count'"; exit 1; }
+
+      - name: Confirm app_writer cannot DELETE
+        run: |
+          set -a && source .env && set +a
+          # Least privilege is asserted, not assumed: this must fail. -h forces
+          # a password-authenticated TCP connection rather than socket trust.
+          if docker compose exec -T -e PGPASSWORD="$APP_WRITER_PASSWORD" postgres \
+              psql -U app_writer -h 127.0.0.1 -d "$POSTGRES_DB" \
+              -c "DELETE FROM runs;" 2>/dev/null; then
+            echo "app_writer was able to DELETE — least privilege is broken"
+            exit 1
+          fi
+          echo "app_writer correctly denied DELETE"
+
+      - name: Dump logs on failure
+        if: failure()
+        run: docker compose --profile infra --profile app logs --tail=200
+
+      - name: Tear down
+        if: always()
+        run: docker compose --profile infra --profile app down -v
