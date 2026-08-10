@@ -122,6 +122,10 @@ test-report: ## Per-suite verbatim pytest summaries + the SHA they were produced
 		$(RUN) pytest tests/$$suite -q 2>&1 | tail -1; \
 	done
 
+.PHONY: tag-phase
+tag-phase: ## Tag a phase — make tag-phase TAG=v0.3 (refuses unless main is clean and synced)
+	@TAG="$(TAG)" bash scripts/tag_phase.sh
+
 .PHONY: lint
 lint: ## ruff check + format check + mypy
 	$(RUN) ruff check .
