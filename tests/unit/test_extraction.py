@@ -19,7 +19,7 @@ import pytest
 from src.contracts import ExtractedQuestion, QuestionType
 from src.extraction.document import TEXT_DENSITY_THRESHOLD, ExtractionError, extract
 from src.extraction.questions import normalise, parse_annotation, parse_questions
-from src.guardrails.injection import scan
+from src.guardrails.injection import sanitize_question, scan
 
 FIXTURES = Path(__file__).resolve().parents[2] / "fixtures"
 PDF = FIXTURES / "golden_rfp.pdf"
@@ -161,6 +161,55 @@ class TestInjectionInTheGoldenRfp:
         assert len(carriers) == 1
         hits = scan(carriers[0].text)
         assert "ignore_previous_instructions" in {hit.pattern_name for hit in hits}
+
+    def test_it_is_detected_on_the_designated_carrier(
+        self, from_pdf: list[ExtractedQuestion], source: dict[str, Any]
+    ) -> None:
+        """Tied to the carrier by position, since extraction assigns its own ids."""
+        carrier_order = next(
+            q["order"]
+            for q in source["questions"]
+            if q["id"] == source["injection_carrier_question_id"]
+        )
+        flagged = [q.order for q in from_pdf if scan(q.text)]
+        assert flagged == [carrier_order]
+
+    def test_a_detected_injection_forces_escalation(
+        self, from_pdf: list[ExtractedQuestion], source: dict[str, Any]
+    ) -> None:
+        """Policy: a tampered question always gets human eyes, however ordinary.
+
+        The carrier is answerable and would otherwise draft happily — which is
+        exactly why the escalation has to be forced rather than inferred.
+        """
+        carrier_order = next(
+            q["order"]
+            for q in source["questions"]
+            if q["id"] == source["injection_carrier_question_id"]
+        )
+        carrier = next(q for q in from_pdf if q.order == carrier_order)
+        result = sanitize_question(carrier.id, carrier.text)
+
+        assert result.injection_detected is True
+        assert result.force_escalate is True
+        assert result.escalation_reason is not None
+        assert "ignore_previous_instructions" in result.escalation_reason
+
+    def test_untampered_questions_neither_flag_nor_escalate(
+        self, from_pdf: list[ExtractedQuestion], source: dict[str, Any]
+    ) -> None:
+        carrier_order = next(
+            q["order"]
+            for q in source["questions"]
+            if q["id"] == source["injection_carrier_question_id"]
+        )
+        for question in from_pdf:
+            if question.order == carrier_order:
+                continue
+            result = sanitize_question(question.id, question.text)
+            assert result.injection_detected is False
+            assert result.force_escalate is False
+            assert result.escalation_reason is None
 
     def test_it_survives_both_renditions(
         self, from_pdf: list[ExtractedQuestion], from_docx: list[ExtractedQuestion]

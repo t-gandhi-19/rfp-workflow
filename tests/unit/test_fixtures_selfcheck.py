@@ -261,13 +261,24 @@ class TestGoldenRfp:
         assert len(golden_source["questions"]) == 20
 
     def test_trap_distribution(self, golden_source: dict[str, Any]) -> None:
+        """One trap per question. `forbidden_term` split out of the injection
+        question so a regression in either cannot hide behind the other."""
         assert dict(sorted(Counter(q["trap"] for q in golden_source["questions"]).items())) == {
+            "forbidden_term": 1,
             "injection": 1,
             "legal": 1,
-            "none": 14,
+            "none": 13,
             "pricing": 1,
             "unanswerable": 3,
         }
+
+    def test_fifteen_questions_are_answerable_from_the_corpus(
+        self, golden_source: dict[str, Any]
+    ) -> None:
+        """13 clean, plus the injection carrier and the warranty question — both
+        of which are ordinary answerable questions that also trip a guardrail."""
+        answerable = [q for q in golden_source["questions"] if q["expects_match"]]
+        assert len(answerable) == 15
 
     def test_twelve_mandatory_and_five_word_limits(self, golden_source: dict[str, Any]) -> None:
         questions = golden_source["questions"]
@@ -278,12 +289,40 @@ class TestGoldenRfp:
         orders = [q["order"] for q in golden_source["questions"]]
         assert orders == list(range(len(orders)))
 
-    def test_the_injection_string_is_embedded_in_a_question(
+    def test_the_injection_lives_on_exactly_the_designated_carrier(
         self, golden_source: dict[str, Any]
     ) -> None:
         needle = golden_source["injection_string"]
         carriers = [q["id"] for q in golden_source["questions"] if needle in q["text"]]
-        assert len(carriers) == 1
+        assert carriers == [golden_source["injection_carrier_question_id"]]
+
+    def test_the_carrier_is_clean_answerable_and_not_mandatory(
+        self, golden_source: dict[str, Any]
+    ) -> None:
+        """Traps must be attributable: the carrier trips injection and nothing else.
+
+        Answerable matters most — the trap's point is that an ordinary question
+        can be tampered with. Non-mandatory keeps the injection eval and the
+        mandatory-coverage eval from contending over the same question.
+        """
+        carrier = next(
+            q
+            for q in golden_source["questions"]
+            if q["id"] == golden_source["injection_carrier_question_id"]
+        )
+        assert carrier["trap"] == "injection"
+        assert carrier["expects_match"], "the carrier must still be answerable"
+        assert carrier["mandatory"] is False
+
+    def test_the_warranty_question_carries_only_the_term_trap(
+        self, golden_source: dict[str, Any]
+    ) -> None:
+        """It used to carry the injection too, which masked injection regressions."""
+        warranty = next(
+            q for q in golden_source["questions"] if q["expects_match"] == "warranty-process"
+        )
+        assert warranty["trap"] == "forbidden_term"
+        assert golden_source["injection_string"] not in warranty["text"]
 
     def test_at_least_three_questions_expect_a_supersession_chain_head(
         self, answer_key: dict[str, Any]
