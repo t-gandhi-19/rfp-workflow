@@ -189,14 +189,15 @@ def _dates(rng: random.Random, count: int) -> list[str]:
 
 
 def generate_qa_pairs() -> list[dict[str, Any]]:
-    rng = random.Random(SEED)
+    # A seeded Mersenne Twister is exactly what this needs: reproducibility, not
+    # unpredictability. Nothing here is a secret.
+    rng = random.Random(SEED)  # noqa: S311
     topics = sorted(TOPICS, key=lambda t: t.key)
 
     actual_types = dict(sorted(Counter(t.question_type for t in topics).items()))
-    if actual_types != dict(sorted(TYPE_COUNTS.items())):
-        raise ValueError(
-            f"corpus type distribution is {actual_types}, expected {dict(sorted(TYPE_COUNTS.items()))}"
-        )
+    expected_types = dict(sorted(TYPE_COUNTS.items()))
+    if actual_types != expected_types:
+        raise ValueError(f"corpus type distribution is {actual_types}, expected {expected_types}")
     if len(topics) != sum(OUTCOME_COUNTS.values()):
         raise ValueError(
             f"corpus has {len(topics)} topics but the outcome distribution covers "
@@ -209,6 +210,7 @@ def generate_qa_pairs() -> list[dict[str, Any]]:
     rng.shuffle(outcomes)
 
     customers = sorted(registry.CUSTOMERS, key=lambda c: c.id)
+    rotation = [c for c in customers if c.name != registry.CONFIDENTIAL_CUSTOMER]
     dates = _dates(rng, len(topics))
 
     pairs: list[dict[str, Any]] = []
@@ -217,11 +219,16 @@ def generate_qa_pairs() -> list[dict[str, Any]]:
         sme = registry.sme_for_capability(capability_id)
         answer_text, cited = _compose_answer(topic, index, sme)
 
+        # The confidential customer is deliberately kept out of the ordinary
+        # rotation. If other pairs also belonged to Bluepine, "confidential
+        # content never reaches another customer's draft" would stop being
+        # cleanly testable — a leak and a legitimate same-customer answer would
+        # look identical.
         confidential = topic.key == CONFIDENTIAL_TOPIC_KEY
         customer = (
             registry.CONFIDENTIAL_CUSTOMER
             if confidential
-            else customers[index % len(customers)].name
+            else rotation[index % len(rotation)].name
         )
 
         pairs.append(
