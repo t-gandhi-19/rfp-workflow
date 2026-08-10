@@ -124,6 +124,18 @@ no_implicit_reexport = true
 extra_checks = true
 
 [[tool.mypy.overrides]]
+# Document and PDF libraries ship no type information. They are used only at the
+# edges (fixture rendering, text extraction) and their results are immediately
+# validated into contracts, so the untyped boundary is short and bounded.
+module = [
+    "docx.*",
+    "pdfplumber.*",
+    "pytesseract.*",
+    "reportlab.*",
+]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
 # Test helpers may take loosely-typed kwargs to build invalid payloads on
 # purpose; the tests themselves are still fully annotated.
 module = ["tests.*"]

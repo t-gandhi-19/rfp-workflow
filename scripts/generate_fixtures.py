@@ -226,9 +226,7 @@ def generate_qa_pairs() -> list[dict[str, Any]]:
         # look identical.
         confidential = topic.key == CONFIDENTIAL_TOPIC_KEY
         customer = (
-            registry.CONFIDENTIAL_CUSTOMER
-            if confidential
-            else rotation[index % len(rotation)].name
+            registry.CONFIDENTIAL_CUSTOMER if confidential else rotation[index % len(rotation)].name
         )
 
         pairs.append(

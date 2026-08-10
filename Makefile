@@ -149,8 +149,20 @@ preflight: check-env ## Verify the embedding path before anything writes to the 
 		LITELLM_BASE_URL_HOST=$${LITELLM_BASE_URL_HOST:-http://localhost:$${LITELLM_PORT_HOST:-4000}} \
 		$(RUN) python -m scripts.preflight
 
+.PHONY: apply-schema
+apply-schema: check-env ## Apply the Neo4j schema (idempotent)
+	@set -a && source .env && set +a && $(HOST_NEO4J) $(RUN) python -m scripts.apply_schema
+
+.PHONY: fixtures
+fixtures: ## Regenerate the synthetic fixtures
+	$(RUN) python -m scripts.generate_fixtures
+
+.PHONY: fixtures-check
+fixtures-check: ## Verify committed fixtures match a fresh generation
+	$(RUN) python -m scripts.generate_fixtures --check
+
 .PHONY: ingest
-ingest: preflight ## Load synthetic fixtures into the graph (runs preflight first)
+ingest: preflight apply-schema ## Load synthetic fixtures into the graph (preflight first)
 	@set -a && source .env && set +a && $(HOST_NEO4J) $(RUN) python -m scripts.ingest
 
 .PHONY: reembed
