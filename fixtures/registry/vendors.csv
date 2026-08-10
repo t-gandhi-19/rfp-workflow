@@ -1,0 +1,13 @@
+code,name,services,active
+VND-0001,CloudNova Partners,landing zone build; managed platform ops,true
+VND-0002,Meridian Systems Integration,application remediation; testing,true
+VND-0003,Apex Data Movers,database migration; replication tooling,true
+VND-0004,Northwind Cloud Advisory,assessment; business case,true
+VND-0005,Falcon Ridge Networks,network design; hybrid connectivity,true
+VND-0006,Silverbrook Security Labs,security review; penetration testing,true
+VND-0007,Harbourline Consulting,programme management; change enablement,true
+VND-0008,Vantage Point Analytics,FinOps analytics; showback reporting,true
+VND-0009,Ironvale Infrastructure,data-centre exit; hardware disposal,true
+VND-0010,Cobalt Street Software,application modernisation; refactoring,true
+VND-0011,Redgate Hollow Testing,non-functional testing; performance,false
+VND-0012,Thornfield Managed Services,24x7 operations; service desk,true

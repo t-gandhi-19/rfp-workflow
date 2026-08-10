@@ -1,0 +1,8 @@
+code,name,country,kind
+LOC-0001,Manchester,United Kingdom,delivery centre
+LOC-0002,Kraków,Poland,delivery centre
+LOC-0003,Pune,India,delivery centre
+LOC-0004,Lisbon,Portugal,delivery centre
+LOC-0005,Toronto,Canada,delivery centre
+LOC-0006,Frankfurt,Germany,data residency region
+LOC-0007,Dublin,Ireland,data residency region

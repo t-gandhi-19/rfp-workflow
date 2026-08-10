@@ -1,0 +1,8 @@
+code,name,scope
+CRT-0001,ISO 27001,information security management
+CRT-0002,ISO 9001,quality management
+CRT-0003,SOC 2 Type II,"security, availability and confidentiality"
+CRT-0004,AWS Migration Competency,AWS migration delivery
+CRT-0005,AWS Advanced Consulting Partner,AWS partner tier
+CRT-0006,Azure Expert MSP,Azure managed services
+CRT-0007,CMMI Level 5,delivery process maturity

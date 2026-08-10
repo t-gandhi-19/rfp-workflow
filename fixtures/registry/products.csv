@@ -1,0 +1,9 @@
+code,name,description,domain
+PRD-0001,MigrateHub,discovery and assessment workbench,cloud_migration
+PRD-0002,CloudLens,dependency mapping and wave planning,cloud_migration
+PRD-0003,ShiftRunner,workload migration execution engine,cloud_migration
+PRD-0004,FinScope,cloud cost modelling and FinOps reporting,cloud_migration
+PRD-0005,SecureLand,landing-zone factory with guardrails,cloud_migration
+PRD-0006,DataFerry,database and data-estate migration,cloud_migration
+PRD-0007,OpsBridge,managed operations and observability,cloud_migration
+PRD-0008,TestHarbor,migration validation and regression suite,cloud_migration
