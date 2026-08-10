@@ -1,0 +1,54 @@
+# Call budgets, concurrency, retries, timeouts (build prompt §12, §18).
+#
+# The deterministic controller enforces these — the agent framework is never
+# trusted to respect them (CLAUDE.md rule 14). LiteLLM mirrors the ceilings as a
+# second, independent enforcement layer, so a controller bug cannot run up a
+# bill on its own.
+version: 1
+
+budget:
+  per_run:
+    # Breaching either ceiling halts the run as halted(budget) with all partial
+    # results already checkpointed to Postgres.
+    max_usd: 2.00
+    max_tokens: 500000
+  per_question:
+    # Hard caps. No loops, no redraft cycles.
+    rerank_calls: 1
+    draft_calls: 1
+    critique_calls: 1
+    validation_retries: 1
+  per_run_calls:
+    triage: 1
+    extract_assist: 1
+
+concurrency:
+  # Per-question fan-out via asyncio.gather + semaphore. The ceiling is Groq
+  # rate limits; raising this moves latency, not cost.
+  question_fanout: 5
+
+gateway:
+  max_retries: 2
+  backoff_initial_seconds: 1.0
+  backoff_multiplier: 2.0
+  # Local aliases run CPU-only on this host, so their timeouts are generous
+  # relative to the Groq-backed ones. See README "Local models".
+  timeouts_seconds:
+    triage-model: 120
+    extract-assist-model: 120
+    rerank-model: 180
+    embed-model: 60
+    loginterp-model: 300
+    drafter-model: 120
+    critic-model: 120
+    judge-model: 120
+
+stages:
+  # Wall-clock ceiling per stage before the controller gives up and escalates
+  # the affected questions.
+  timeouts_seconds:
+    parsing: 300
+    extracting: 300
+    drafting: 1800
+    compliance: 300
+    assembling: 300
