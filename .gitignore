@@ -1,0 +1,36 @@
+# Secrets — never commit. .env.example documents every variable (CLAUDE.md rule 16).
+.env
+.env.*
+!.env.example
+
+# Run artifacts
+out/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.eggs/
+build/
+dist/
+
+# Tooling caches
+.ruff_cache/
+.mypy_cache/
+.pytest_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# Docker volume data (named volumes live in the Docker VM, but bind-mount
+# strays and local dumps land here)
+volumes/
+*.dump
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

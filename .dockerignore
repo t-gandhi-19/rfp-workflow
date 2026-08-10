@@ -1,0 +1,27 @@
+# Keep build contexts small — this matters especially when building from the
+# Windows filesystem over /mnt/c, where every context file is a slow read.
+.git/
+.github/
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.ruff_cache/
+.mypy_cache/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Never ship secrets or run artifacts into an image
+.env
+.env.*
+!.env.example
+out/
+
+# Docs and fixtures are not needed by the API images
+docs/
+*.md
+!README.md
+
+.DS_Store
+Thumbs.db
