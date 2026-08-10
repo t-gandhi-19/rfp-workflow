@@ -90,7 +90,8 @@ class GatewayClient:
 
         if response.status_code >= 300:
             raise GatewayError(
-                f"gateway returned {response.status_code} for alias '{alias}': {response.text[:400]}"
+                f"gateway returned {response.status_code} for alias '{alias}': "
+                f"{response.text[:400]}"
             )
 
         data = response.json().get("data")

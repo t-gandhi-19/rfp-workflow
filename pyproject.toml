@@ -78,7 +78,11 @@ select = [
     "S",      # flake8-bandit
 ]
 ignore = [
-    "S104",  # binding 0.0.0.0 is intended inside containers
+    "S104",      # binding 0.0.0.0 is intended inside containers
+    # ASYNC109 warns against hand-rolled `timeout` parameters. Ours are forwarded
+    # straight to httpx, which implements the timeout properly; replacing them
+    # with asyncio.timeout would wrap a correct implementation in a second one.
+    "ASYNC109",
 ]
 
 [tool.ruff.lint.isort]

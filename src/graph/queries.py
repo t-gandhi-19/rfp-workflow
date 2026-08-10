@@ -229,11 +229,12 @@ async def entity_exists(
     kind = entity_type.value
     normalised = normalise_name(needle)
 
-    for query, params in (
+    passes: list[tuple[str, dict[str, Any]]] = [
         (_ENTITY_BY_CODE, {"kind": kind, "needle": needle}),
         (_ENTITY_BY_EXACT_NAME, {"kind": kind, "normalised": normalised}),
         (_ENTITY_BY_PARTIAL_NAME, {"kind": kind, "normalised": normalised}),
-    ):
+    ]
+    for query, params in passes:
         if not normalised and query is not _ENTITY_BY_CODE:
             continue
         result = await session.run(query, **params)
