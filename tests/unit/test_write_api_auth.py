@@ -360,6 +360,7 @@ class TestAuthorizedWrites:
         self, client: httpx.AsyncClient, keypair: tuple[Any, str], engine: _StubEngine
     ) -> None:
         _, pem = keypair
+        token = make_token(pem, roles=["eval-writer"], client_id="evals-sa")
         payload = {
             "scores": [
                 {
@@ -384,10 +385,73 @@ class TestAuthorizedWrites:
             response = await client.post(
                 "/v1/eval-results",
                 json=payload,
-                headers={"Authorization": f"Bearer {make_token(pem)}"},
+                headers={"Authorization": f"Bearer {token}"},
             )
         assert response.status_code == 200
         assert len(engine.connection.statements) == 2
+
+
+class TestRolesAreScopedPerEndpoint:
+    """draft-writer and eval-writer are not interchangeable, in either direction.
+
+    Before the Phase 1 review the eval harness held draft-writer, which let it
+    write answers it had no business writing. Splitting the roles is only worth
+    anything if both halves of the boundary are tested.
+    """
+
+    async def test_the_harness_cannot_write_a_draft(
+        self, client: httpx.AsyncClient, keypair: tuple[Any, str], engine: _StubEngine
+    ) -> None:
+        _, pem = keypair
+        token = make_token(pem, roles=["eval-writer"], client_id="evals-sa")
+        async with client:
+            response = await client.put(
+                f"/v1/drafts/{RUN_ID}/{QUESTION_ID}",
+                json=_draft_payload(),
+                headers={"Authorization": f"Bearer {token}"},
+            )
+        assert response.status_code == 403
+        assert "draft-writer" in response.json()["detail"]
+        assert engine.connection.statements == []
+
+    async def test_the_harness_cannot_checkpoint_a_run(
+        self, client: httpx.AsyncClient, keypair: tuple[Any, str]
+    ) -> None:
+        _, pem = keypair
+        token = make_token(pem, roles=["eval-writer"], client_id="evals-sa")
+        async with client:
+            response = await client.put(
+                f"/v1/runs/{RUN_ID}",
+                json=_run_state_payload(),
+                headers={"Authorization": f"Bearer {token}"},
+            )
+        assert response.status_code == 403
+
+    async def test_the_drafter_cannot_write_eval_results(
+        self, client: httpx.AsyncClient, keypair: tuple[Any, str], engine: _StubEngine
+    ) -> None:
+        _, pem = keypair
+        payload = {
+            "scores": [
+                {
+                    "git_sha": "abc123",
+                    "run_id": RUN_ID,
+                    "metric": "retrieval.recall_at_5",
+                    "value": 0.99,
+                    "threshold": 0.8,
+                    "passed": True,
+                }
+            ]
+        }
+        async with client:
+            response = await client.post(
+                "/v1/eval-results",
+                json=payload,
+                headers={"Authorization": f"Bearer {make_token(pem)}"},
+            )
+        assert response.status_code == 403
+        assert "eval-writer" in response.json()["detail"]
+        assert engine.connection.statements == []
 
 
 class TestBoundaryValidation:

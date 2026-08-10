@@ -29,7 +29,11 @@ from src.write_api import repository
 from src.write_api.auth import Principal, build_verifier, require_role
 from src.write_api.settings import get_settings
 
+# Roles are mapped per endpoint rather than per service. The eval harness needs
+# to record metrics; it has no business writing an answer. Giving it its own
+# role keeps that boundary enforced by the token rather than by convention.
 DRAFT_WRITER = "draft-writer"
+EVAL_WRITER = "eval-writer"
 
 
 class Ack(BaseModel):
@@ -161,7 +165,7 @@ async def put_draft(
 @app.post("/v1/eval-results", response_model=Ack, tags=["evals"])
 async def post_eval_results(
     batch: EvalScoreBatch,
-    principal: Annotated[Principal, Depends(require_role(DRAFT_WRITER))],
+    principal: Annotated[Principal, Depends(require_role(EVAL_WRITER))],
 ) -> Ack:
     """Persist eval metrics, keyed by git SHA. Idempotent per (sha, run, metric)."""
     async with get_engine().begin() as conn:
