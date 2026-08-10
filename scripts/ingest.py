@@ -340,8 +340,12 @@ async def run(*, reembed_only: bool) -> int:
     finally:
         await close_driver()
 
+    # Diagnostics go to stderr so stdout stays a clean JSON document. CI parses
+    # this output to assert idempotency, and a warning printed to stdout made
+    # that parse fail — the warning is important, but not at the cost of making
+    # the summary unreadable to anything but a human.
     if fake_embeddings_enabled():
-        sys.stdout.write(
+        sys.stderr.write(
             "WARNING: RFP_FAKE_EMBEDDINGS=1 — vectors are deterministic stand-ins, "
             "not semantic embeddings. Retrieval quality means nothing in this state.\n"
         )
