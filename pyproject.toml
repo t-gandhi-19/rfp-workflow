@@ -10,10 +10,10 @@ readme = "README.md"
 requires-python = "==3.12.*"
 license = { text = "MIT" }
 
-# Phase 1 dependency set only. Later phases add their own (Phase 2: neo4j,
-# pdfplumber, python-docx, pytesseract; Phase 4: crewai, opentelemetry, openlit;
-# Phase 6: streamlit). Keeping this lean keeps CI and image builds fast.
+# Phases 1-2. Later phases add their own (Phase 4: crewai, opentelemetry,
+# openlit; Phase 6: streamlit). Keeping this lean keeps CI and image builds fast.
 dependencies = [
+    # Phase 1
     "pydantic>=2.10,<3",
     "pydantic-settings>=2.7,<3",
     "fastapi>=0.115,<1",
@@ -24,6 +24,13 @@ dependencies = [
     "pyjwt[crypto]>=2.10,<3",
     "httpx>=0.28,<1",
     "pyyaml>=6.0,<7",
+    # Phase 2 — graph, fixtures, extraction
+    "neo4j>=5.27,<6",
+    "pdfplumber>=0.11,<1",
+    "python-docx>=1.1,<2",
+    "pytesseract>=0.3.13,<1",
+    "pillow>=11.0,<12",
+    "reportlab>=4.2,<5",
 ]
 
 [dependency-groups]

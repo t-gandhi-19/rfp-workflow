@@ -78,6 +78,8 @@ ps: ## Show service status
 # Run from the host, so Postgres is reached on the published port rather than
 # by its compose service name.
 HOST_PG = POSTGRES_HOST=localhost POSTGRES_PORT=$${POSTGRES_PORT_HOST:-5432}
+HOST_NEO4J = NEO4J_URI=bolt://localhost:$${NEO4J_BOLT_PORT_HOST:-7687} \
+             LITELLM_BASE_URL_HOST=$${LITELLM_BASE_URL_HOST:-http://localhost:$${LITELLM_PORT_HOST:-4000}}
 
 .PHONY: migrate
 migrate: check-env ## Apply Alembic migrations (idempotent)
@@ -140,13 +142,20 @@ define phase_gate
 	@exit 1
 endef
 
+.PHONY: preflight
+preflight: check-env ## Verify the embedding path before anything writes to the graph
+	@set -a && source .env && set +a && \
+		OLLAMA_BASE_URL_HOST=$${OLLAMA_BASE_URL_HOST:-http://localhost:11434} \
+		LITELLM_BASE_URL_HOST=$${LITELLM_BASE_URL_HOST:-http://localhost:$${LITELLM_PORT_HOST:-4000}} \
+		$(RUN) python -m scripts.preflight
+
 .PHONY: ingest
-ingest: ## (Phase 2) Load synthetic fixtures into the graph
-	$(call phase_gate,ingest,2,Needs the graph schema and the synthetic corpus.)
+ingest: preflight ## Load synthetic fixtures into the graph (runs preflight first)
+	@set -a && source .env && set +a && $(HOST_NEO4J) $(RUN) python -m scripts.ingest
 
 .PHONY: reembed
-reembed: ## (Phase 2) Re-embed the corpus after an embedding-model change
-	$(call phase_gate,reembed,2,Needs ingest and the pinned embedding model.)
+reembed: preflight ## Recompute every embedding after an embedding-model change
+	@set -a && source .env && set +a && $(HOST_NEO4J) $(RUN) python -m scripts.ingest --reembed
 
 .PHONY: evals
 evals: ## (Phase 3) Run the eval harness and write the HTML report
