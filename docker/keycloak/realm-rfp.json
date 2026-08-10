@@ -1,0 +1,445 @@
+{
+  "realm": "rfp",
+  "displayName": "RFP Workflow",
+  "enabled": true,
+  "sslRequired": "none",
+  "registrationAllowed": false,
+  "loginWithEmailAllowed": false,
+  "duplicateEmailsAllowed": false,
+  "resetPasswordAllowed": false,
+  "editUsernameAllowed": false,
+  "bruteForceProtected": true,
+
+  "accessTokenLifespan": 300,
+  "accessTokenLifespanForImplicitFlow": 300,
+  "ssoSessionIdleTimeout": 1800,
+  "ssoSessionMaxLifespan": 36000,
+  "defaultSignatureAlgorithm": "RS256",
+
+  "eventsEnabled": true,
+  "eventsExpiration": 604800,
+  "eventsListeners": ["jboss-logging"],
+  "enabledEventTypes": [
+    "CLIENT_LOGIN",
+    "CLIENT_LOGIN_ERROR",
+    "LOGIN",
+    "LOGIN_ERROR",
+    "LOGOUT",
+    "LOGOUT_ERROR",
+    "CODE_TO_TOKEN",
+    "CODE_TO_TOKEN_ERROR",
+    "REFRESH_TOKEN",
+    "REFRESH_TOKEN_ERROR",
+    "TOKEN_EXCHANGE",
+    "TOKEN_EXCHANGE_ERROR",
+    "INTROSPECT_TOKEN",
+    "INTROSPECT_TOKEN_ERROR",
+    "PERMISSION_TOKEN",
+    "CLIENT_INFO",
+    "CLIENT_INFO_ERROR"
+  ],
+  "adminEventsEnabled": true,
+  "adminEventsDetailsEnabled": true,
+
+  "roles": {
+    "realm": [
+      {
+        "name": "rfp-reader",
+        "description": "Read run state and run metadata. The baseline role every service account holds.",
+        "composite": false
+      },
+      {
+        "name": "kg-reader",
+        "description": "Call the read-only MCP tools over the knowledge graph. Never raw Cypher.",
+        "composite": false
+      },
+      {
+        "name": "kg-writer",
+        "description": "Write to the knowledge graph. Held by ingest-sa alone.",
+        "composite": false
+      },
+      {
+        "name": "draft-writer",
+        "description": "Write drafts, critiques, compliance results and eval results through write-api.",
+        "composite": false
+      },
+      {
+        "name": "log-reader",
+        "description": "Read run logs and traces. No write path anywhere.",
+        "composite": false
+      },
+      {
+        "name": "view-events",
+        "description": "Read the Keycloak audit event stream for the trust dashboard.",
+        "composite": false
+      },
+      {
+        "name": "submitter",
+        "description": "DEFINED BUT NEVER GRANTED. Nothing here auto-submits an RFP response. It exists so its emptiness is testable; see tests/security/test_no_submitter_holder.py. Do not grant it.",
+        "composite": false
+      }
+    ]
+  },
+
+  "clients": [
+    {
+      "clientId": "rfp-api",
+      "name": "RFP API resource",
+      "description": "Bearer-only resource identifier. Every service-account token carries this as its audience, and write-api and the MCP server reject tokens that do not.",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "bearerOnly": true,
+      "publicClient": false,
+      "serviceAccountsEnabled": false,
+      "standardFlowEnabled": false,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false
+    },
+    {
+      "clientId": "triage-sa",
+      "name": "Triage agent",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": false,
+      "bearerOnly": false,
+      "serviceAccountsEnabled": true,
+      "standardFlowEnabled": false,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "clientAuthenticatorType": "client-secret",
+      "secret": "dev-secret-triage-sa",
+      "protocolMappers": [
+        {
+          "name": "rfp-api-audience",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "consentRequired": false,
+          "config": {
+            "included.custom.audience": "rfp-api",
+            "id.token.claim": "false",
+            "access.token.claim": "true",
+            "introspection.token.claim": "true"
+          }
+        }
+      ]
+    },
+    {
+      "clientId": "extractor-sa",
+      "name": "Requirement extractor agent",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": false,
+      "bearerOnly": false,
+      "serviceAccountsEnabled": true,
+      "standardFlowEnabled": false,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "clientAuthenticatorType": "client-secret",
+      "secret": "dev-secret-extractor-sa",
+      "protocolMappers": [
+        {
+          "name": "rfp-api-audience",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "consentRequired": false,
+          "config": {
+            "included.custom.audience": "rfp-api",
+            "id.token.claim": "false",
+            "access.token.claim": "true",
+            "introspection.token.claim": "true"
+          }
+        }
+      ]
+    },
+    {
+      "clientId": "retriever-sa",
+      "name": "Retriever agent",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": false,
+      "bearerOnly": false,
+      "serviceAccountsEnabled": true,
+      "standardFlowEnabled": false,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "clientAuthenticatorType": "client-secret",
+      "secret": "dev-secret-retriever-sa",
+      "protocolMappers": [
+        {
+          "name": "rfp-api-audience",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "consentRequired": false,
+          "config": {
+            "included.custom.audience": "rfp-api",
+            "id.token.claim": "false",
+            "access.token.claim": "true",
+            "introspection.token.claim": "true"
+          }
+        }
+      ]
+    },
+    {
+      "clientId": "drafter-sa",
+      "name": "Drafter agent",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": false,
+      "bearerOnly": false,
+      "serviceAccountsEnabled": true,
+      "standardFlowEnabled": false,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "clientAuthenticatorType": "client-secret",
+      "secret": "dev-secret-drafter-sa",
+      "protocolMappers": [
+        {
+          "name": "rfp-api-audience",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "consentRequired": false,
+          "config": {
+            "included.custom.audience": "rfp-api",
+            "id.token.claim": "false",
+            "access.token.claim": "true",
+            "introspection.token.claim": "true"
+          }
+        }
+      ]
+    },
+    {
+      "clientId": "critic-sa",
+      "name": "Critic agent",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": false,
+      "bearerOnly": false,
+      "serviceAccountsEnabled": true,
+      "standardFlowEnabled": false,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "clientAuthenticatorType": "client-secret",
+      "secret": "dev-secret-critic-sa",
+      "protocolMappers": [
+        {
+          "name": "rfp-api-audience",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "consentRequired": false,
+          "config": {
+            "included.custom.audience": "rfp-api",
+            "id.token.claim": "false",
+            "access.token.claim": "true",
+            "introspection.token.claim": "true"
+          }
+        }
+      ]
+    },
+    {
+      "clientId": "assembler-sa",
+      "name": "Assembler",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": false,
+      "bearerOnly": false,
+      "serviceAccountsEnabled": true,
+      "standardFlowEnabled": false,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "clientAuthenticatorType": "client-secret",
+      "secret": "dev-secret-assembler-sa",
+      "protocolMappers": [
+        {
+          "name": "rfp-api-audience",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "consentRequired": false,
+          "config": {
+            "included.custom.audience": "rfp-api",
+            "id.token.claim": "false",
+            "access.token.claim": "true",
+            "introspection.token.claim": "true"
+          }
+        }
+      ]
+    },
+    {
+      "clientId": "ingest-sa",
+      "name": "Fixture ingest",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": false,
+      "bearerOnly": false,
+      "serviceAccountsEnabled": true,
+      "standardFlowEnabled": false,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "clientAuthenticatorType": "client-secret",
+      "secret": "dev-secret-ingest-sa",
+      "protocolMappers": [
+        {
+          "name": "rfp-api-audience",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "consentRequired": false,
+          "config": {
+            "included.custom.audience": "rfp-api",
+            "id.token.claim": "false",
+            "access.token.claim": "true",
+            "introspection.token.claim": "true"
+          }
+        }
+      ]
+    },
+    {
+      "clientId": "evals-sa",
+      "name": "Evaluation harness",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": false,
+      "bearerOnly": false,
+      "serviceAccountsEnabled": true,
+      "standardFlowEnabled": false,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "clientAuthenticatorType": "client-secret",
+      "secret": "dev-secret-evals-sa",
+      "protocolMappers": [
+        {
+          "name": "rfp-api-audience",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "consentRequired": false,
+          "config": {
+            "included.custom.audience": "rfp-api",
+            "id.token.claim": "false",
+            "access.token.claim": "true",
+            "introspection.token.claim": "true"
+          }
+        }
+      ]
+    },
+    {
+      "clientId": "dashboard-sa",
+      "name": "Trust dashboard",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": false,
+      "bearerOnly": false,
+      "serviceAccountsEnabled": true,
+      "standardFlowEnabled": false,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "clientAuthenticatorType": "client-secret",
+      "secret": "dev-secret-dashboard-sa",
+      "protocolMappers": [
+        {
+          "name": "rfp-api-audience",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "consentRequired": false,
+          "config": {
+            "included.custom.audience": "rfp-api",
+            "id.token.claim": "false",
+            "access.token.claim": "true",
+            "introspection.token.claim": "true"
+          }
+        }
+      ]
+    },
+    {
+      "clientId": "loginterp-sa",
+      "name": "Log interpreter",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": false,
+      "bearerOnly": false,
+      "serviceAccountsEnabled": true,
+      "standardFlowEnabled": false,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "clientAuthenticatorType": "client-secret",
+      "secret": "dev-secret-loginterp-sa",
+      "protocolMappers": [
+        {
+          "name": "rfp-api-audience",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "consentRequired": false,
+          "config": {
+            "included.custom.audience": "rfp-api",
+            "id.token.claim": "false",
+            "access.token.claim": "true",
+            "introspection.token.claim": "true"
+          }
+        }
+      ]
+    }
+  ],
+
+  "users": [
+    {
+      "username": "service-account-triage-sa",
+      "enabled": true,
+      "serviceAccountClientId": "triage-sa",
+      "realmRoles": ["rfp-reader"]
+    },
+    {
+      "username": "service-account-extractor-sa",
+      "enabled": true,
+      "serviceAccountClientId": "extractor-sa",
+      "realmRoles": ["rfp-reader"]
+    },
+    {
+      "username": "service-account-retriever-sa",
+      "enabled": true,
+      "serviceAccountClientId": "retriever-sa",
+      "realmRoles": ["rfp-reader", "kg-reader"]
+    },
+    {
+      "username": "service-account-drafter-sa",
+      "enabled": true,
+      "serviceAccountClientId": "drafter-sa",
+      "realmRoles": ["rfp-reader", "kg-reader", "draft-writer"]
+    },
+    {
+      "username": "service-account-critic-sa",
+      "enabled": true,
+      "serviceAccountClientId": "critic-sa",
+      "realmRoles": ["rfp-reader", "kg-reader"]
+    },
+    {
+      "username": "service-account-assembler-sa",
+      "enabled": true,
+      "serviceAccountClientId": "assembler-sa",
+      "realmRoles": ["rfp-reader", "kg-reader", "draft-writer"]
+    },
+    {
+      "username": "service-account-ingest-sa",
+      "enabled": true,
+      "serviceAccountClientId": "ingest-sa",
+      "realmRoles": ["kg-reader", "kg-writer"]
+    },
+    {
+      "username": "service-account-evals-sa",
+      "enabled": true,
+      "serviceAccountClientId": "evals-sa",
+      "realmRoles": ["rfp-reader", "kg-reader", "draft-writer"]
+    },
+    {
+      "username": "service-account-dashboard-sa",
+      "enabled": true,
+      "serviceAccountClientId": "dashboard-sa",
+      "realmRoles": ["rfp-reader", "log-reader", "view-events"],
+      "clientRoles": {
+        "realm-management": ["view-events", "view-users"]
+      }
+    },
+    {
+      "username": "service-account-loginterp-sa",
+      "enabled": true,
+      "serviceAccountClientId": "loginterp-sa",
+      "realmRoles": ["rfp-reader", "log-reader"]
+    }
+  ]
+}
