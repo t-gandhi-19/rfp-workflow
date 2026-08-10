@@ -18,6 +18,20 @@ retrieval:
 rerank:
   # Stage C: ONE batched call per question, scoring the surviving candidates
   # 0-1 for relevance.
+  #
+  # WHETHER THIS SHIPS ON IS AN OPEN MEASUREMENT, NOT AN OPINION.
+  # The retrieval eval runs the full golden set twice, rerank on and off, and
+  # reports Recall@5 and MRR side by side. The decision rule, to be applied once
+  # and recorded here with the measured deltas and the date:
+  #
+  #     if |ΔRecall@5| < 0.02 AND |ΔMRR| < 0.03  ->  enabled: false
+  #     otherwise                                ->  enabled: true, cost accepted
+  #
+  # The rule exists because reranking costs ~95-120s per question on this
+  # CPU-only host, and "it feels better" is not a reason to pay that. Whichever
+  # way it lands, the unused path stays tested in CI via recorded responses.
+  #
+  # STATUS: not yet applied — the ablation runs with the eval harness.
   enabled: true
   # Gateway alias. Application code never names the model.
   alias: rerank-model

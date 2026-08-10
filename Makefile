@@ -178,8 +178,16 @@ reembed: preflight ## Recompute every embedding after an embedding-model change
 	@set -a && source .env && set +a && $(HOST_NEO4J) $(RUN) python -m scripts.ingest --reembed
 
 .PHONY: evals
-evals: ## (Phase 3) Run the eval harness and write the HTML report
+evals: ## Run the eval harness with the config-default rerank setting (fast path)
 	$(call phase_gate,evals,3,Needs retrieval scoring and the golden answer key.)
+
+.PHONY: evals-full
+evals-full: ## Run the eval harness with rerank FORCED ON — the official numbers
+	$(call phase_gate,evals-full,3,Needs retrieval scoring and the golden answer key.)
+
+.PHONY: evals-ablation
+evals-ablation: ## Run retrieval twice, rerank on and off, and report the deltas
+	$(call phase_gate,evals-ablation,3,Needs the retrieval eval category.)
 
 .PHONY: run
 run: ## (Phase 4) Run one RFP end to end — make run FILE=path/to/rfp.pdf
