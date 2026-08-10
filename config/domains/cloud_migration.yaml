@@ -1,0 +1,93 @@
+# The single domain config for v1 (build prompt §0, §1).
+#
+# Domain is a config value and exactly one domain config exists. Triage compares
+# a detected domain against `key` and halts the run on a mismatch rather than
+# guessing.
+#
+# Phase 1 defines the structure and the deterministic rule sets. The retrieval
+# filters are consumed in Phase 3 and the compliance rules in Phase 4; both are
+# written now so the whole policy surface is reviewable in one place.
+version: 1
+key: cloud_migration
+display_name: Cloud Migration Services
+description: >-
+  Enterprise application and data-center migration to AWS/Azure: assessment and
+  discovery, landing zones, workload and database migration, cutover and
+  rollback, FinOps, and managed operations.
+
+question_types:
+  - key: technical
+    description: Architecture, migration mechanics, tooling, cutover, DR.
+  - key: compliance
+    description: Certifications, data residency, GDPR handling, audit rights.
+  - key: company_info
+    description: Team model, delivery centers, certifications held, partnerships.
+  - key: commercial
+    description: >-
+      Engagement model, governance, RACI, warranty process. Process only —
+      pricing is a hard block, see forbidden_content.
+
+retrieval:
+  # Hard drops applied inside the Cypher query, not after the fact — this is why
+  # the graph does hybrid retrieval in one hop and cannot develop sync lag.
+  filters:
+    exclude_superseded: true
+    exclude_confidential_for_other_customers: true
+    restrict_to_domain: true
+  # Capability vocabulary. Doubles as the SME routing key (SME OWNS Capability)
+  # and as the coverage-gap axis: NO_MATCH plus no capability match means no one
+  # owns this topic yet.
+  capabilities:
+    - assessment
+    - landing-zones
+    - workload-migration
+    - data-migration
+    - security-compliance
+    - finops-operations
+
+compliance:
+  # Deterministic post-processors (build prompt §15). Every rule here either
+  # escalates the question to an SME or hard-fails the answer; none of them ask
+  # a model for an opinion.
+  forbidden_content:
+    pricing:
+      action: hard_block_escalate
+      # Any currency-shaped token means the draft is asserting commercials.
+      patterns:
+        - '(?i)(?:USD|EUR|GBP|INR|\$|€|£|₹)\s?\d'
+        - '(?i)\b\d+(?:[.,]\d+)?\s?(?:USD|EUR|GBP|INR|dollars?|euros?|rupees?)\b'
+        - '(?i)\bper\s+(?:hour|day|month|user|workload|seat)\b.*\d'
+      reason: Pricing is never drafted by the workflow; a human owns commercials.
+    legal:
+      action: hard_block_escalate
+      terms:
+        - SLA
+        - service level agreement
+        - indemnity
+        - indemnification
+        - penalty
+        - liquidated damages
+        - warranty
+        - liability
+        - unlimited liability
+      reason: Contractual commitments require legal review before any response.
+
+  # Named entities must resolve in the registry or the answer hard-fails
+  # (build prompt §15, closed-world grounding).
+  entity_types_checked:
+    - vendor
+    - product
+    - certification
+    - client
+    - tool
+    - location
+
+  # Case studies and client names may only appear when explicitly cleared.
+  public_usability:
+    require_publicly_usable_flag: true
+
+  # Word limits and mandatory flags come from the RFP itself; these are the
+  # defaults applied when a question carries none.
+  defaults:
+    word_limit: null
+    mandatory: false

@@ -1,0 +1,83 @@
+# LiteLLM proxy — the only egress to models (CLAUDE.md rule 5).
+#
+# Aliases are the contract. Application code names `drafter-model`, never
+# `llama-3.3-70b-versatile`, so a model swap is a change here and nowhere else.
+#
+# Local aliases run on Ollama on the HOST. This project was built on a machine
+# with no GPU, so the local tier is llama3.2:3b — small enough to stay usable on
+# CPU. On a GPU host, raise it here without touching a line of Python.
+#
+# The Groq model ids below are first exercised in Phase 3; Phase 1 makes no model
+# calls at all.
+
+model_list:
+  # ---- local, via Ollama on the host -------------------------------------
+  - model_name: triage-model
+    litellm_params:
+      model: ollama/llama3.2:3b
+      api_base: os.environ/OLLAMA_BASE_URL
+
+  - model_name: extract-assist-model
+    litellm_params:
+      model: ollama/llama3.2:3b
+      api_base: os.environ/OLLAMA_BASE_URL
+
+  - model_name: rerank-model
+    litellm_params:
+      model: ollama/llama3.2:3b
+      api_base: os.environ/OLLAMA_BASE_URL
+      temperature: 0
+
+  - model_name: loginterp-model
+    litellm_params:
+      model: ollama/llama3.2:3b
+      api_base: os.environ/OLLAMA_BASE_URL
+
+  # Pinned at 768 dimensions to match the Neo4j vector index. Changing this
+  # model means reindexing — hence `make reembed` exists from day one.
+  - model_name: embed-model
+    litellm_params:
+      model: ollama/nomic-embed-text
+      api_base: os.environ/OLLAMA_BASE_URL
+
+  # ---- Groq: the two quality-critical steps ------------------------------
+  - model_name: drafter-model
+    litellm_params:
+      model: groq/llama-3.3-70b-versatile
+      api_key: os.environ/GROQ_API_KEY
+
+  - model_name: critic-model
+    litellm_params:
+      model: groq/llama-3.3-70b-versatile
+      api_key: os.environ/GROQ_API_KEY
+
+  # Evals only, never a production run. A different model family from the
+  # drafter on purpose, so a model is never grading its own prose.
+  - model_name: judge-model
+    litellm_params:
+      model: groq/qwen/qwen3-32b
+      api_key: os.environ/GROQ_API_KEY
+
+litellm_settings:
+  drop_params: true
+  # Caching embeddings makes re-ingest and `make reembed` cheap in development.
+  cache: true
+  cache_params:
+    type: local
+    supported_call_types: ["embedding"]
+  # Retries and timeouts mirror config/limits.yaml. A persistent failure must
+  # escalate the affected question, never crash the run.
+  num_retries: 2
+  request_timeout: 180
+
+general_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY
+  # Second, independent enforcement layer for the ceilings in config/limits.yaml.
+  # The controller enforces them too; neither is trusted alone.
+  max_budget: 25.0
+  budget_duration: 30d
+
+router_settings:
+  routing_strategy: simple-shuffle
+  allowed_fails: 2
+  cooldown_time: 30

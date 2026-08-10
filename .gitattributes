@@ -1,0 +1,23 @@
+# Line endings are not cosmetic here: a shell script or Makefile checked out
+# with CRLF fails inside a Linux container with an opaque "bad interpreter" or
+# "missing separator" error. This repo is authored on Windows and runs on Linux,
+# so every text file is normalised to LF on commit and on checkout.
+* text=auto eol=lf
+
+*.sh      text eol=lf
+*.py      text eol=lf
+*.yml     text eol=lf
+*.yaml    text eol=lf
+*.json    text eol=lf
+*.toml    text eol=lf
+*.md      text eol=lf
+*.cypher  text eol=lf
+Makefile  text eol=lf
+Dockerfile text eol=lf
+*.Dockerfile text eol=lf
+
+# Binary fixtures must never be normalised.
+*.pdf   binary
+*.docx  binary
+*.png   binary
+*.jpg   binary

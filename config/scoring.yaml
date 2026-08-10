@@ -1,0 +1,45 @@
+# Retrieval scoring and confidence weights (build prompt §10).
+#
+# Everything here is deterministic arithmetic applied by Python, never by a
+# model (CLAUDE.md rule 3). The scoring functions and the confidence formula
+# each have unit tests; changing a number here changes test expectations, which
+# is the point — the tuning surface is explicit and reviewable.
+version: 1
+
+retrieval:
+  # Vector candidates pulled from the Neo4j vector index, in-domain.
+  top_k: 20
+  # How many survive into the single batched rerank call.
+  rerank_top_n: 8
+  # No candidate at or above this final_score => NO_MATCH => the drafter must
+  # escalate rather than invent an answer.
+  match_floor: 0.55
+
+final_score:
+  # final_score = w_vector_graph * (vector_score * graph_multiplier)
+  #             + w_rerank      * rerank_score
+  weights:
+    vector_graph: 0.5
+    rerank: 0.5
+
+graph_multiplier:
+  # Applied to vector_score before blending. Encodes what the graph knows that
+  # embedding similarity cannot: did this answer win, how stale is it, is it
+  # backed by evidence.
+  outcome:
+    won: 1.15
+    unknown: 1.0
+    lost: 0.85
+  recency:
+    # multiplier = exp(-age_days / decay_days)
+    decay_days: 540
+  # Applied when the answer has at least one EVIDENCED_BY relationship.
+  evidence_bonus: 1.1
+
+confidence:
+  # confidence = final_score(primary source) * coverage_ratio + critique_delta,
+  # clamped to [0, 1]. coverage_ratio = claims carrying a source id / total
+  # claims. This is COMPUTED — never a model's self-reported number.
+  escalation_threshold: 0.6
+  clamp_min: 0.0
+  clamp_max: 1.0
