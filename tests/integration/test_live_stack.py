@@ -20,11 +20,25 @@ from typing import Any
 import httpx
 import pytest
 
+from tests.live import require_write_api_and_keycloak
+
 pytestmark = pytest.mark.integration
 
 KEYCLOAK_BASE = os.environ.get("KEYCLOAK_BASE", "http://localhost:8080")
 WRITE_API_BASE = os.environ.get("WRITE_API_BASE", "http://localhost:8001")
 REALM = os.environ.get("KEYCLOAK_REALM", "rfp")
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _live_stack() -> None:
+    """Skip this module unless the stack is actually up.
+
+    Without this, a fresh clone's bare `pytest` run goes red for the entirely
+    uninteresting reason that Docker is not running — which teaches people that
+    red is normal.
+    """
+    require_write_api_and_keycloak()
+
 
 TOKEN_URL = f"{KEYCLOAK_BASE}/realms/{REALM}/protocol/openid-connect/token"
 ADMIN_TOKEN_URL = f"{KEYCLOAK_BASE}/realms/master/protocol/openid-connect/token"
@@ -169,6 +183,60 @@ class TestRealTokensAgainstRealApi:
             headers={"Authorization": f"Bearer {token}"},
         )
         assert response.status_code == 200, response.text
+
+
+class TestRolesAreScopedPerEndpoint:
+    """The eval-writer / draft-writer split, proved against the real realm.
+
+    The unit suite proves write-api enforces the mapping. This proves Keycloak
+    actually issues the roles the mapping assumes — the two can disagree, and
+    only this catches it.
+    """
+
+    async def test_the_harness_cannot_write_a_draft(self, http: httpx.AsyncClient) -> None:
+        token = await _client_credentials_token(http, "evals-sa", os.environ["EVALS_SA_SECRET"])
+        response = await http.put(
+            f"{WRITE_API_BASE}/v1/drafts/{RUN_ID}/{QUESTION_ID}",
+            json={
+                "question_id": QUESTION_ID,
+                "answer_text": "The harness has no business writing this.",
+                "source_ids": ["ans-014"],
+                "confidence": 0.9,
+                "needs_sme_review": False,
+            },
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert response.status_code == 403, response.text
+
+    async def test_the_drafter_cannot_write_eval_results(self, http: httpx.AsyncClient) -> None:
+        token = await _client_credentials_token(http, "drafter-sa", os.environ["DRAFTER_SA_SECRET"])
+        response = await http.post(
+            f"{WRITE_API_BASE}/v1/eval-results",
+            json={
+                "scores": [
+                    {
+                        "git_sha": "integration",
+                        "run_id": RUN_ID,
+                        "metric": "smoke.should_not_land",
+                        "value": 1.0,
+                        "threshold": 1.0,
+                        "passed": True,
+                    }
+                ]
+            },
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert response.status_code == 403, response.text
+
+    async def test_the_evals_token_actually_carries_eval_writer(
+        self, http: httpx.AsyncClient
+    ) -> None:
+        import jwt
+
+        token = await _client_credentials_token(http, "evals-sa", os.environ["EVALS_SA_SECRET"])
+        roles = jwt.decode(token, options={"verify_signature": False})["realm_access"]["roles"]
+        assert "eval-writer" in roles
+        assert "draft-writer" not in roles
 
 
 class TestTokenShape:
