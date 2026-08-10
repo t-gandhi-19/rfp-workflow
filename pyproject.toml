@@ -125,7 +125,10 @@ warn_return_any = false
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
-addopts = "-q --strict-markers"
+# No -q here: combined with a -q on the command line it becomes -qq, which
+# suppresses the "N passed, M skipped in Xs" summary line that every PR must
+# quote verbatim.
+addopts = "--strict-markers"
 markers = [
     "integration: requires the docker compose stack to be running",
 ]

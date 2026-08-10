@@ -40,7 +40,9 @@ build: check-env ## Build application images
 
 .PHONY: up
 up: check-env ## Bring up the whole stack (infra + app) and wait for health
-	GIT_SHA=$(GIT_SHA) $(COMPOSE) $(INFRA) $(APP) up -d --wait
+	# --build so a source change is never silently served by a stale image.
+	# Layer caching makes the no-change case near-free.
+	GIT_SHA=$(GIT_SHA) $(COMPOSE) $(INFRA) $(APP) up -d --wait --build
 	@echo
 	@echo "Stack is up:"
 	@echo "  Keycloak   http://localhost:8080  (realm: rfp)"
@@ -102,6 +104,21 @@ test-integration: check-env ## Run integration tests (requires 'make up')
 
 .PHONY: test-all
 test-all: test test-integration ## Run every test
+
+.PHONY: test-report
+test-report: ## Per-suite verbatim pytest summaries + the SHA they were produced at
+	@# Every PR quotes this output verbatim. Reproducing the numbers by hand
+	@# invites remembering them wrong, so the report is generated, never typed.
+	@echo "commit:    $$(git rev-parse HEAD)"
+	@echo "short SHA: $$(git rev-parse --short HEAD)"
+	@echo "worktree:  $$(git status --porcelain | wc -l | tr -d ' ') uncommitted path(s)"
+	@set -a; [ -f .env ] && . ./.env; set +a; \
+	export KEYCLOAK_BASE=$${KEYCLOAK_BASE:-http://localhost:$${KEYCLOAK_PORT_HOST:-8080}}; \
+	export WRITE_API_BASE=$${WRITE_API_BASE:-http://localhost:$${WRITE_API_PORT:-8001}}; \
+	for suite in unit security integration; do \
+		printf '\n### tests/%s\n' "$$suite"; \
+		$(RUN) pytest tests/$$suite -q 2>&1 | tail -1; \
+	done
 
 .PHONY: lint
 lint: ## ruff check + format check + mypy
