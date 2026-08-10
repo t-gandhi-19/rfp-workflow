@@ -555,6 +555,11 @@ TOPICS: tuple[Topic, ...] = (
         "responsible for that task and we remain accountable for the outcome.",
         vendors=("Meridian Systems Integration",),
     ),
+    # QA-0039. This pair exists to exercise the legal-adjacent path end to end:
+    # the question IS retrieved and drafted normally, and the resulting draft is
+    # then ALWAYS escalated by the forbidden-term guardrail because "warranty" is
+    # in the legal term list. Contrast with pricing, which is never drafted at
+    # all. If this pair is ever removed, that path loses its only exercise.
     Topic(
         "warranty-process",
         "commercial",
