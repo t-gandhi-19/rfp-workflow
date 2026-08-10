@@ -16,12 +16,14 @@ import httpx
 import pytest
 
 from src.contracts.embedding import EmbeddingConfig
+from src.contracts.thresholds import RerankConfig
 from src.gateway.client import GatewayClient
 from src.gateway.ollama_admin import is_installed, normalise_tag
 from src.gateway.preflight import (
     check_embedding_width,
     check_model_installed,
     check_ollama_reachable,
+    check_rerank_model_installed,
     format_report,
     ollama_base_url_for_host,
     run_preflight,
@@ -44,7 +46,17 @@ CONFIG = EmbeddingConfig.model_validate(
     }
 )
 
-INSTALLED = ["nomic-embed-text:latest", "llama3.2:latest"]
+RERANK = RerankConfig.model_validate(
+    {
+        "enabled": True,
+        "alias": "rerank-model",
+        "tag": "llama3.1:8b",
+        "temperature": 0,
+        "timeout_seconds": 180,
+    }
+)
+
+INSTALLED = ["nomic-embed-text:latest", "llama3.1:8b", "llama3.2:latest"]
 
 
 def ollama(models: list[str] | None, *, unreachable: bool = False) -> httpx.AsyncClient:
@@ -91,7 +103,7 @@ class TestReachability:
         async with ollama(INSTALLED) as client:
             result = await check_ollama_reachable(OLLAMA, client=client)
         assert result.ok is True
-        assert "2 model(s) installed" in result.detail
+        assert "3 model(s) installed" in result.detail
 
     async def test_reports_failure_with_a_fix_when_unreachable(self) -> None:
         async with ollama(None, unreachable=True) as client:
@@ -128,6 +140,36 @@ class TestModelPresence:
         assert result.fix == "ollama pull nomic-embed-text"
 
 
+class TestRerankModelPresence:
+    """Presence only — invoking an 8B model on CPU would make preflight take
+    minutes, which would get it skipped, which defeats the point of having it."""
+
+    async def test_passes_when_installed(self) -> None:
+        async with ollama(INSTALLED) as client:
+            result = await check_rerank_model_installed(OLLAMA, RERANK, client=client)
+        assert result.ok is True
+
+    async def test_fails_with_the_literal_pull_command_when_absent(self) -> None:
+        async with ollama(["nomic-embed-text:latest"]) as client:
+            result = await check_rerank_model_installed(OLLAMA, RERANK, client=client)
+        assert result.ok is False
+        assert result.fix == "ollama pull llama3.1:8b"
+
+    async def test_fails_with_the_pull_command_when_ollama_is_down(self) -> None:
+        async with ollama(None, unreachable=True) as client:
+            result = await check_rerank_model_installed(OLLAMA, RERANK, client=client)
+        assert result.ok is False
+        assert result.fix == "ollama pull llama3.1:8b"
+
+    async def test_skipped_when_rerank_is_disabled(self) -> None:
+        """Scoring runs without it, so a missing model is not a failure."""
+        disabled = RERANK.model_copy(update={"enabled": False})
+        async with ollama([]) as client:
+            result = await check_rerank_model_installed(OLLAMA, disabled, client=client)
+        assert result.ok is True
+        assert "disabled" in result.detail
+
+
 class TestEmbeddingWidth:
     """The check that matters most — a width mismatch is otherwise silent."""
 
@@ -159,7 +201,7 @@ class TestFullRun:
             results = await run_preflight(
                 {}, config=CONFIG, gateway=GATEWAY, ollama_client=oc, http_client=gc
             )
-        assert [r.ok for r in results] == [True, True, True]
+        assert [r.ok for r in results] == [True, True, True, True]
         assert "All checks passed" in format_report(results)
 
     async def test_reports_every_failure_not_just_the_first(self) -> None:
@@ -168,10 +210,13 @@ class TestFullRun:
             results = await run_preflight(
                 {}, config=CONFIG, gateway=GATEWAY, ollama_client=oc, http_client=gc
             )
-        assert [r.ok for r in results] == [True, False, False]
+        # Embedding model missing, rerank model missing, and the wrong width —
+        # all three reported from one run rather than one at a time.
+        assert [r.ok for r in results] == [True, False, False, False]
         report = format_report(results)
-        assert "2 check(s) failed" in report
+        assert "3 check(s) failed" in report
         assert "ollama pull nomic-embed-text" in report
+        assert "ollama pull llama3.1:8b" in report
 
     async def test_report_prints_the_fix_verbatim(self) -> None:
         async with ollama([]) as oc, gateway(768) as gc:
@@ -185,7 +230,7 @@ class TestFullRun:
             results = await run_preflight(
                 {}, config=CONFIG, gateway=GATEWAY, ollama_client=oc, http_client=gc
             )
-        assert [r.ok for r in results] == [False, False, True]
+        assert [r.ok for r in results] == [False, False, False, True]
 
 
 class TestHostUrl:

@@ -15,9 +15,35 @@ retrieval:
   # escalate rather than invent an answer.
   match_floor: 0.55
 
+rerank:
+  # Stage C: ONE batched call per question, scoring the surviving candidates
+  # 0-1 for relevance.
+  enabled: true
+  # Gateway alias. Application code never names the model.
+  alias: rerank-model
+  # The concrete Ollama tag the alias must resolve to. `make preflight` asserts
+  # it is installed, for the same reason it checks the embedding model: a
+  # missing model surfaces as a confusing failure from deep inside a run.
+  tag: llama3.1:8b
+  # Deterministic scoring. A reranker that varies between identical runs makes
+  # every retrieval eval noise.
+  temperature: 0
+  # Bound on how long one batched call may take before the question falls back
+  # to rerank-disabled scoring.
+  #
+  # Measured on this CPU-only host: one batched call over 8 candidates took
+  # 120.7s (475 prompt tokens, 103 completion). 180s left only ~50% headroom on
+  # a machine that also runs another stack, so this is set from the measurement
+  # rather than from a guess.
+  timeout_seconds: 300
+
 final_score:
   # final_score = w_vector_graph * (vector_score * graph_multiplier)
   #             + w_rerank      * rerank_score
+  #
+  # When rerank.enabled is false, or a call fails for one question, the rerank
+  # weight is redistributed onto vector_graph rather than treated as a zero
+  # score — a failed rerank must not look like "every candidate is irrelevant".
   weights:
     vector_graph: 0.5
     rerank: 0.5

@@ -35,6 +35,22 @@ class FinalScoreConfig(BaseModel):
     weights: FinalScoreWeights
 
 
+class RerankConfig(BaseModel):
+    """Stage C — one batched call per question (build prompt §10 C)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool
+    #: Gateway alias. Application code never names a model.
+    alias: str = Field(min_length=1)
+    #: Concrete provider tag the alias must resolve to; asserted by preflight.
+    tag: str = Field(min_length=1)
+    #: Zero, so identical runs rerank identically. Anything else makes the
+    #: retrieval evals measure noise as well as quality.
+    temperature: float = Field(ge=0.0, le=2.0)
+    timeout_seconds: float = Field(gt=0.0)
+
+
 class RetrievalConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -80,6 +96,7 @@ class ScoringConfig(BaseModel):
 
     version: int
     retrieval: RetrievalConfig
+    rerank: RerankConfig
     final_score: FinalScoreConfig
     graph_multiplier: GraphMultiplierConfig
     confidence: ConfidenceConfig

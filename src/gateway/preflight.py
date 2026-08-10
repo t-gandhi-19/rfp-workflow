@@ -24,6 +24,7 @@ from dataclasses import dataclass
 import httpx
 
 from src.contracts.embedding import EmbeddingConfig, embedding_config
+from src.contracts.thresholds import RerankConfig, scoring_config
 from src.gateway.client import GatewayClient, GatewayError
 from src.gateway.ollama_admin import installed_tags, is_installed
 
@@ -97,6 +98,46 @@ async def check_model_installed(
     )
 
 
+async def check_rerank_model_installed(
+    base_url: str,
+    rerank: RerankConfig,
+    *,
+    timeout: float = 10.0,
+    client: httpx.AsyncClient | None = None,
+) -> CheckResult:
+    """The rerank model is present on the host Ollama.
+
+    Only its presence is checked, not its output. Reranking has no fixed-shape
+    result to probe the way an embedding has a width, and actually invoking an
+    8B model on a CPU host would make preflight take minutes — which would get
+    it skipped, which defeats it.
+    """
+    name = f"rerank model '{rerank.tag}' installed"
+    if not rerank.enabled:
+        return CheckResult(
+            name=name,
+            ok=True,
+            detail="rerank is disabled in config; scoring runs without it",
+        )
+    try:
+        tags = await installed_tags(base_url, timeout=timeout, client=client)
+    except httpx.HTTPError as exc:
+        return CheckResult(
+            name=name,
+            ok=False,
+            detail=f"cannot reach Ollama at {base_url} ({type(exc).__name__})",
+            fix=f"ollama pull {rerank.tag}",
+        )
+    if not is_installed(rerank.tag, tags):
+        return CheckResult(
+            name=name,
+            ok=False,
+            detail=f"not installed. Present: {', '.join(tags) or '(none)'}",
+            fix=f"ollama pull {rerank.tag}",
+        )
+    return CheckResult(name=name, ok=True, detail="present")
+
+
 async def check_embedding_width(
     gateway: GatewayClient,
     config: EmbeddingConfig,
@@ -147,6 +188,7 @@ async def run_preflight(
     env: dict[str, str],
     *,
     config: EmbeddingConfig | None = None,
+    rerank: RerankConfig | None = None,
     gateway: GatewayClient | None = None,
     ollama_client_timeout: float = 10.0,
     ollama_client: httpx.AsyncClient | None = None,
@@ -154,10 +196,11 @@ async def run_preflight(
 ) -> list[CheckResult]:
     """Run every check and return all results — never short-circuit.
 
-    Reporting all three at once means one run tells you everything that is
+    Reporting them all at once means one run tells you everything that is
     wrong, rather than revealing the next problem only after you fix this one.
     """
     resolved = config or embedding_config()
+    resolved_rerank = rerank or scoring_config().rerank
     base_url = ollama_base_url_for_host(env)
     gw = gateway or GatewayClient.from_env()
 
@@ -167,8 +210,11 @@ async def run_preflight(
     installed = await check_model_installed(
         base_url, resolved, timeout=ollama_client_timeout, client=ollama_client
     )
+    reranker = await check_rerank_model_installed(
+        base_url, resolved_rerank, timeout=ollama_client_timeout, client=ollama_client
+    )
     width = await check_embedding_width(gw, resolved, client=http_client)
-    return [reachable, installed, width]
+    return [reachable, installed, reranker, width]
 
 
 def format_report(results: list[CheckResult]) -> str:

@@ -14,23 +14,27 @@ model_list:
   # ---- local, via Ollama on the host -------------------------------------
   - model_name: triage-model
     litellm_params:
-      model: ollama/llama3.2:3b
+      model: ollama/llama3.2
       api_base: os.environ/OLLAMA_BASE_URL
 
   - model_name: extract-assist-model
     litellm_params:
-      model: ollama/llama3.2:3b
+      model: ollama/llama3.2
       api_base: os.environ/OLLAMA_BASE_URL
 
+  # Pinned to the 8B tier: reranking is the one local step whose judgement
+  # quality directly moves a retrieval metric, so it gets the larger model even
+  # though this host is CPU-only. `config/scoring.yaml` holds the same tag and
+  # `make preflight` asserts they agree with what is installed.
   - model_name: rerank-model
     litellm_params:
-      model: ollama/llama3.2:3b
+      model: ollama/llama3.1:8b
       api_base: os.environ/OLLAMA_BASE_URL
       temperature: 0
 
   - model_name: loginterp-model
     litellm_params:
-      model: ollama/llama3.2:3b
+      model: ollama/llama3.2
       api_base: os.environ/OLLAMA_BASE_URL
 
   # Pinned at 768 dimensions to match the Neo4j vector index. Changing this
