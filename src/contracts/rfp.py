@@ -99,3 +99,13 @@ class ExtractedQuestion(BaseModel):
     word_limit: int | None = Field(default=None, gt=0)
     mandatory: bool = False
     order: int = Field(ge=0)
+    #: The number as printed in the document — "1.1", "3.4". Distinct from
+    #: `order`, which is our own zero-based position.
+    #:
+    #: None when a document numbers nothing; the extractor still assigns `order`.
+    #:
+    #: Phase 4 note: `escalations.json` and the assembler's SME-TODO blocks must
+    #: reference this, not `order`. A reviewer opening the source document looks
+    #: for "Question 3.4"; an internal index means nothing to them and cannot be
+    #: cross-checked against the RFP they were sent.
+    printed_number: str | None = Field(default=None, min_length=1)

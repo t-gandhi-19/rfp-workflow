@@ -68,7 +68,16 @@ class TestParity:
         assert [q.model_dump() for q in from_pdf] == [q.model_dump() for q in from_docx]
 
     @pytest.mark.parametrize(
-        "field", ["normalized_text", "section", "question_type", "word_limit", "mandatory", "order"]
+        "field",
+        [
+            "normalized_text",
+            "section",
+            "question_type",
+            "word_limit",
+            "mandatory",
+            "order",
+            "printed_number",
+        ],
     )
     def test_field_by_field(
         self, from_pdf: list[ExtractedQuestion], from_docx: list[ExtractedQuestion], field: str
@@ -124,6 +133,34 @@ class TestAccuracy:
             sum(1 for q in from_pdf if q.word_limit is not None)
             == answer_key["counts"]["with_word_limit"]
         )
+
+
+class TestPrintedNumber:
+    """The number a human reads, kept as a field rather than a text prefix."""
+
+    def test_every_question_carries_its_printed_number(
+        self, from_pdf: list[ExtractedQuestion], source: dict[str, Any]
+    ) -> None:
+        expected = [q["number"] for q in sorted(source["questions"], key=lambda q: q["order"])]
+        assert [q.printed_number for q in from_pdf] == expected
+
+    def test_it_is_stripped_from_the_normalised_text(
+        self, from_pdf: list[ExtractedQuestion]
+    ) -> None:
+        for question in from_pdf:
+            assert question.printed_number is not None
+            assert not question.normalized_text.startswith(question.printed_number)
+
+    def test_it_is_distinct_from_order(self, from_pdf: list[ExtractedQuestion]) -> None:
+        """order is our index; printed_number is the document's own label."""
+        first = from_pdf[0]
+        assert first.order == 0
+        assert first.printed_number == "1.1"
+
+    def test_an_unnumbered_document_still_extracts(self) -> None:
+        """printed_number is optional; order is always assigned."""
+        questions = parse_questions("Section Company\n1.1 A numbered question?", rfp_id="x")
+        assert questions[0].printed_number == "1.1"
 
 
 class TestNormalisation:
