@@ -113,7 +113,7 @@ plugins = ["pydantic.mypy"]
 
 [[tool.mypy.overrides]]
 # `strict` is not a per-module option, so the strict flag set is spelled out.
-module = ["src.contracts.*", "src.graph.*"]
+module = ["src.contracts.*", "src.graph.*", "src.retrieval.*"]
 disallow_any_generics = true
 disallow_subclassing_any = true
 disallow_untyped_calls = true

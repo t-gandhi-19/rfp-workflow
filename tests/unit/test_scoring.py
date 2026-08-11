@@ -43,6 +43,7 @@ def candidate(
 ) -> CandidateInput:
     return CandidateInput(
         question_id="q-1",
+        matched_question_id="hq-1",
         answer_node_id=node,
         tier1_summary=f"summary for {node}",
         vector_score=vector,

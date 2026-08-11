@@ -33,7 +33,15 @@ class CandidateInput:
     without a database.
     """
 
+    #: The question being ANSWERED — the one from the incoming RFP. Not the
+    #: corpus question this answer was originally written for; the contract
+    #: requires every candidate in a RetrievalResult to name the question it was
+    #: scored for, and conflating the two makes a result claim it answers a
+    #: historical question nobody asked.
     question_id: str
+    #: The corpus question the vector search actually matched. Kept for the
+    #: report, so a ranking can be traced back to what it resembled.
+    matched_question_id: str | None
     answer_node_id: str
     tier1_summary: str
     vector_score: float
