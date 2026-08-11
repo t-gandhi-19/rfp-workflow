@@ -17,8 +17,9 @@ from src.contracts.thresholds import scoring_config
 from src.retrieval.scoring import (
     CandidateInput,
     blend,
-    graph_multiplier,
+    preference,
     recency_multiplier,
+    recency_preference,
     score_candidates,
     to_retrieval_result,
 )
@@ -93,32 +94,69 @@ class TestRecency:
             recency_multiplier(-1)
 
 
-class TestGraphMultiplierHandComputed:
+class TestPreferenceHandComputed:
+    """D17: recency is a nudge in [0.90, 1.0], and the product is clamped."""
+
+    def test_recency_is_bounded_below(self) -> None:
+        """0.90 + 0.10 * exp(-900/540) = 0.90 + 0.10 * 0.1888756 = 0.9188876.
+
+        Under the old formula this term was 0.1889 — enough on its own to bury
+        a perfect match. Now it costs a stale answer about 8%.
+        """
+        assert recency_preference(900) == pytest.approx(0.9188876, abs=1e-6)
+        assert recency_preference(0) == pytest.approx(1.0)
+        assert recency_preference(10_000) == pytest.approx(0.90, abs=1e-3)
+
     def test_won_recent_evidenced(self) -> None:
-        """1.15 * exp(-30/540) * 1.1 = 1.15 * 0.9459594 * 1.1 = 1.196..."""
-        expected = 1.15 * math.exp(-30 / 540) * 1.1
-        assert graph_multiplier(
-            outcome=Outcome.WON, age_days=30, has_evidence=True
-        ) == pytest.approx(expected)
-        assert expected == pytest.approx(1.1966, abs=1e-4)
+        """1.15 * 1.1 * (0.90 + 0.10*exp(-30/540)) = 1.265 * 0.9945959 = 1.25816."""
+        expected = 1.15 * 1.1 * (0.90 + 0.10 * math.exp(-30 / 540))
+        assert preference(outcome=Outcome.WON, age_days=30, has_evidence=True) == pytest.approx(
+            expected
+        )
+        assert expected == pytest.approx(1.25816, abs=1e-5)
 
     def test_lost_stale_unevidenced(self) -> None:
-        """0.85 * exp(-900/540) * 1.0 = 0.85 * 0.1888756 = 0.16054..."""
-        expected = 0.85 * math.exp(-900 / 540)
-        assert graph_multiplier(
-            outcome=Outcome.LOST, age_days=900, has_evidence=False
-        ) == pytest.approx(expected)
-        assert expected == pytest.approx(0.16054, abs=1e-5)
+        """0.85 * 1.0 * 0.9188876 = 0.78105 — a discount, not an erasure."""
+        expected = 0.85 * (0.90 + 0.10 * math.exp(-900 / 540))
+        assert preference(outcome=Outcome.LOST, age_days=900, has_evidence=False) == pytest.approx(
+            expected
+        )
+        assert expected == pytest.approx(0.78105, abs=1e-5)
 
     def test_unknown_today_unevidenced_is_neutral(self) -> None:
-        assert graph_multiplier(
-            outcome=Outcome.UNKNOWN, age_days=0, has_evidence=False
-        ) == pytest.approx(1.0)
+        assert preference(outcome=Outcome.UNKNOWN, age_days=0, has_evidence=False) == pytest.approx(
+            1.0
+        )
 
     def test_evidence_is_exactly_the_configured_bonus(self) -> None:
-        without = graph_multiplier(outcome=Outcome.WON, age_days=100, has_evidence=False)
-        with_evidence = graph_multiplier(outcome=Outcome.WON, age_days=100, has_evidence=True)
+        without = preference(outcome=Outcome.WON, age_days=100, has_evidence=False)
+        with_evidence = preference(outcome=Outcome.WON, age_days=100, has_evidence=True)
         assert with_evidence / without == pytest.approx(EVIDENCE)
+
+    def test_the_total_span_is_clamped(self) -> None:
+        """The whole point: preference spans 1.73x, not 8x."""
+        best = preference(outcome=Outcome.WON, age_days=0, has_evidence=True)
+        worst = preference(outcome=Outcome.LOST, age_days=100_000, has_evidence=False)
+        assert best <= CONFIG.preference.clamp_max
+        assert worst >= CONFIG.preference.clamp_min
+        assert best / worst <= CONFIG.preference.clamp_max / CONFIG.preference.clamp_min
+
+    def test_preference_cannot_invert_beyond_the_ratio_boundary(self) -> None:
+        """A pair whose relevance ratio exceeds clamp_max/clamp_min (1.733) can
+        never be reordered by preference, however extreme the preferences."""
+        boundary = CONFIG.preference.clamp_max / CONFIG.preference.clamp_min
+        strong_relevance, weak_relevance = 0.90, 0.90 / (boundary * 1.01)
+        best = CONFIG.preference.clamp_max
+        worst = CONFIG.preference.clamp_min
+        assert strong_relevance * worst > weak_relevance * best
+
+    def test_just_inside_the_boundary_preference_can_decide(self) -> None:
+        """Two comparably-relevant candidates SHOULD be separated by preference."""
+        boundary = CONFIG.preference.clamp_max / CONFIG.preference.clamp_min
+        strong_relevance, weak_relevance = 0.90, 0.90 / (boundary * 0.99)
+        assert strong_relevance * CONFIG.preference.clamp_min < (
+            weak_relevance * CONFIG.preference.clamp_max
+        )
 
 
 class TestOrderingProperties:

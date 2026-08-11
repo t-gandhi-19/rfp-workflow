@@ -89,6 +89,24 @@ class ConfidenceConfig(BaseModel):
     clamp_max: float = Field(ge=0.0, le=1.0)
 
 
+class PreferenceConfig(BaseModel):
+    """D17: preference reorders qualifying candidates; it never gates them."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    #: Recency becomes a nudge in [floor, 1.0] rather than a gate in [0, 1].
+    recency_floor: float = Field(ge=0.0, le=1.0)
+    clamp_min: float = Field(gt=0.0)
+    clamp_max: float = Field(gt=0.0)
+
+
+class CalibrationSettings(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    min_background_pairs: int = Field(gt=0)
+    min_separation: float = Field(ge=0.0)
+
+
 class ScoringConfig(BaseModel):
     """Whole of `config/scoring.yaml`, validated on load."""
 
@@ -97,6 +115,8 @@ class ScoringConfig(BaseModel):
     version: int
     retrieval: RetrievalConfig
     rerank: RerankConfig
+    preference: PreferenceConfig
+    calibration: CalibrationSettings
     final_score: FinalScoreConfig
     graph_multiplier: GraphMultiplierConfig
     confidence: ConfidenceConfig

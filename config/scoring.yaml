@@ -62,6 +62,40 @@ final_score:
     vector_graph: 0.5
     rerank: 0.5
 
+# D17. Relevance decides IF a candidate qualifies; preference decides WHICH of
+# the qualifying ones wins. The split exists because preference used to be able
+# to overturn relevance outright: outcome x recency x evidence spanned 0.16-1.27
+# (8x) against a similarity band of ~1.5x, so a recent won answer outranked a
+# far better match on a different topic.
+preference:
+  # Recency stops being a gate and becomes a nudge: [0.90, 1.0] instead of
+  # [0.0, 1.0]. A two-year-old answer that is exactly right should still win
+  # over a fresh answer that is merely adjacent.
+  #   recency_pref = floor + (1 - floor) * exp(-age_days / half_life)
+  recency_floor: 0.90
+  # Belt and braces on the product of outcome x evidence x recency_pref. With
+  # these bounds preference can only reorder candidates whose relevance ratio is
+  # below 1.30/0.75 = 1.733; beyond that no combination of preferences can
+  # invert them. Asserted by a boundary test.
+  clamp_min: 0.75
+  clamp_max: 1.30
+
+calibration:
+  # Raw cosine is not comparable across models or corpora, so the floor is
+  # derived from corpus statistics rather than guessed. See
+  # fixtures/calibration.json and src/retrieval/calibration.py.
+  #
+  # Geometry matters: every score the floor judges is query-embedded text against
+  # document-embedded text, so the calibration statistics are measured in that
+  # same cross-prefix geometry. Document-to-document numbers are a different
+  # distribution and would misplace the floor.
+  #
+  # Guard against percentile noise on a small corpus.
+  min_background_pairs: 500
+  # The same-topic p05 must clear the background p99 by at least this much, or
+  # ingest fails loudly rather than retrieval failing quietly.
+  min_separation: 0.02
+
 graph_multiplier:
   # Applied to vector_score before blending. Encodes what the graph knows that
   # embedding similarity cannot: did this answer win, how stale is it, is it

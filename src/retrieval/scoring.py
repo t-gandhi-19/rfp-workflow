@@ -22,6 +22,7 @@ from dataclasses import dataclass
 
 from src.contracts import CandidateFlags, Outcome, RetrievalResult, RetrievalStatus, ScoredCandidate
 from src.contracts.thresholds import ScoringConfig, scoring_config
+from src.retrieval.calibration import CalibrationArtifact
 
 
 @dataclass(frozen=True)
@@ -66,18 +67,36 @@ def recency_multiplier(age_days: int, *, config: ScoringConfig | None = None) ->
     return math.exp(-age_days / resolved.graph_multiplier.recency.decay_days)
 
 
-def graph_multiplier(
+def recency_preference(age_days: int, *, config: ScoringConfig | None = None) -> float:
+    """Recency as a nudge, not a gate: [floor, 1.0].
+
+    D17. Previously recency was raw `exp(-age/half_life)`, which reaches 0.19 at
+    two and a half years — enough to bury a perfect match under a fresh but
+    merely adjacent one. A two-year-old answer that is exactly right should
+    still win; it should just win by slightly less.
+    """
+    resolved = config or scoring_config()
+    floor = resolved.preference.recency_floor
+    return floor + (1.0 - floor) * recency_multiplier(age_days, config=resolved)
+
+
+def preference(
     *,
     outcome: Outcome,
     age_days: int,
     has_evidence: bool,
     config: ScoringConfig | None = None,
 ) -> float:
-    """What the graph knows that embedding similarity cannot.
+    """Which of the *qualifying* candidates should win (D17).
 
-    Outcome, recency and evidence, multiplied. An answer that won a real bid,
-    was written recently, and is backed by a case study should outrank an
-    equally-similar answer that lost two years ago and cites nothing.
+    Outcome and evidence keep their specified values; recency is compressed into
+    a nudge. The product is clamped so preference can only reorder candidates of
+    comparable relevance — beyond a relevance ratio of clamp_max/clamp_min it
+    cannot invert them at all, which is the invariant a boundary test pins.
+
+    This never decides whether a candidate qualifies. That is relevance's job,
+    and conflating the two is what let an 8x preference span overturn a 1.5x
+    similarity difference.
     """
     resolved = config or scoring_config()
     multipliers = resolved.graph_multiplier
@@ -87,9 +106,36 @@ def graph_multiplier(
         Outcome.LOST: multipliers.outcome.lost,
         Outcome.UNKNOWN: multipliers.outcome.unknown,
     }[outcome]
-
     evidence_factor = multipliers.evidence_bonus if has_evidence else 1.0
-    return outcome_factor * recency_multiplier(age_days, config=resolved) * evidence_factor
+
+    raw = outcome_factor * evidence_factor * recency_preference(age_days, config=resolved)
+    return min(resolved.preference.clamp_max, max(resolved.preference.clamp_min, raw))
+
+
+def relevance(
+    *,
+    calibrated_similarity: float,
+    rerank_score: float | None,
+    config: ScoringConfig | None = None,
+) -> float:
+    """Is this the right answer? (D17)
+
+    Calibrated similarity, blended with the rerank score when there is one. The
+    NO_MATCH decision uses this and nothing else: preference never rescues a
+    below-floor candidate and never dooms an above-floor one.
+
+    A missing rerank redistributes its weight rather than scoring zero — absence
+    of an opinion is not an opinion of irrelevance.
+    """
+    resolved = config or scoring_config()
+    weights = resolved.final_score.weights
+    base = min(1.0, max(0.0, calibrated_similarity))
+    if rerank_score is None:
+        return base
+    total = weights.vector_graph + weights.rerank
+    if total <= 0:
+        raise ValueError("final_score weights must sum to something positive")
+    return (weights.vector_graph * base + weights.rerank * rerank_score) / total
 
 
 def blend(
@@ -129,6 +175,7 @@ def score_candidates(
     candidates: list[CandidateInput],
     *,
     rerank_scores: dict[int, float] | None = None,
+    calibration: CalibrationArtifact | None = None,
     config: ScoringConfig | None = None,
 ) -> list[ScoredCandidate]:
     """Apply stages B and D to every candidate and rank the result.
@@ -142,26 +189,35 @@ def score_candidates(
 
     scored: list[ScoredCandidate] = []
     for index, candidate in enumerate(candidates):
-        multiplier = graph_multiplier(
+        # Raw cosine is not comparable across models or corpora; calibration maps
+        # it onto a measured [0, 1] where 0 means "unrelated" and 1 means "as
+        # close as a genuine paraphrase".
+        calibrated = (
+            calibration.calibrated(candidate.vector_score)
+            if calibration is not None
+            else candidate.vector_score
+        )
+        rerank_score = None if rerank_scores is None else rerank_scores.get(index)
+        candidate_relevance = relevance(
+            calibrated_similarity=calibrated, rerank_score=rerank_score, config=resolved
+        )
+        candidate_preference = preference(
             outcome=candidate.outcome,
             age_days=candidate.age_days,
             has_evidence=candidate.has_evidence,
             config=resolved,
         )
-        rerank_score = None if rerank_scores is None else rerank_scores.get(index)
-        final = blend(
-            vector_score=candidate.vector_score,
-            multiplier=multiplier,
-            rerank_score=rerank_score,
-            config=resolved,
-        )
+        final = min(1.0, candidate_relevance * candidate_preference)
         scored.append(
             ScoredCandidate(
                 question_id=candidate.question_id,
                 answer_node_id=candidate.answer_node_id,
                 tier1_summary=candidate.tier1_summary,
                 vector_score=candidate.vector_score,
-                graph_multiplier=multiplier,
+                calibrated_similarity=calibrated,
+                relevance=candidate_relevance,
+                preference=candidate_preference,
+                graph_multiplier=candidate_preference,
                 rerank_score=rerank_score,
                 final_score=final,
                 flags=CandidateFlags(
@@ -183,6 +239,7 @@ def to_retrieval_result(
     question_id: str,
     scored: list[ScoredCandidate],
     *,
+    floor_override: float | None = None,
     config: ScoringConfig | None = None,
 ) -> RetrievalResult:
     """Wrap ranked candidates with the MATCHED / NO_MATCH verdict.
@@ -192,8 +249,10 @@ def to_retrieval_result(
     the eval scores it at zero tolerance in both directions.
     """
     resolved = config or scoring_config()
-    floor = resolved.retrieval.match_floor
-    cleared = [candidate for candidate in scored if candidate.final_score >= floor]
+    # D17: the floor is judged on relevance. Preference reorders what qualifies;
+    # it never decides what qualifies.
+    floor = floor_override if floor_override is not None else resolved.retrieval.match_floor
+    cleared = [candidate for candidate in scored if candidate.relevance >= floor]
     return RetrievalResult(
         question_id=question_id,
         candidates=scored,
