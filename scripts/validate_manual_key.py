@@ -1,10 +1,10 @@
-"""Validate the hand-written answer key. Run via `make validate-manual-key`.
+"""Validate the externally-authored answer key. Run via `make validate-manual-key`.
 
 Checks structure and cross-references only. It deliberately does NOT compare the
 key against `golden_rfp_source.json`: that file and the extractor share an
 ancestor, so forcing agreement with it would convert the one independent
 measurement in this repository back into a derived one. Disagreement between the
-human key and the extractor is a finding for the eval report to surface, not
+externally-authored key and the extractor is a finding for the eval report to surface, not
 something this command should sand off.
 
     python -m scripts.validate_manual_key
@@ -82,7 +82,7 @@ def validate() -> int:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Validate the hand-written answer key")
+    parser = argparse.ArgumentParser(description="Validate the externally-authored answer key")
     parser.add_argument(
         "--emit-schema",
         action="store_true",

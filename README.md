@@ -221,6 +221,42 @@ thing already does.
 | 5 | `v0.5` | Adversarial suite, cost and latency reporting, `make demo` |
 | 6 | `v0.6` | Streamlit trust dashboard, log interpreter, audit wiring |
 
+## Decision register
+
+Decisions that shape what this system does and does not do. Earlier decisions
+(domain, providers, orchestration, gateway, vector store) are recorded in the
+build prompt and in the phase PRs; this register carries the ones taken during
+the build that a reader would otherwise have to infer from code.
+
+### D16 — LLM-judge-only quality evaluation
+
+**Decision.** Quality evals are scored by `judge-model` alone. The fixed
+human spot-check sample and the judge-vs-human agreement metric are removed from
+the eval spec and are **not** implemented.
+
+**Compensating controls, all mandatory:**
+
+1. The judge resolves to a **different model family** than the drafter, so a
+   model never grades its own prose (self-preference mitigation).
+2. The judge prompt and the rubric are **versioned files**, and the version is
+   logged on every judge span — a score is always attributable to the exact text
+   that produced it.
+3. Every judge score **attaches to the run trace** with the judged text's span
+   ids, so any score can be audited after the fact rather than taken on trust.
+4. The **deterministic zero-tolerance evals** — grounding coverage, entity
+   existence, staleness, rejection, confidentiality, compliance — are unaffected.
+   They never depended on human judgment, and they carry the trust load.
+
+**Accepted risk, stated plainly.** Judge scores are uncalibrated against human
+opinion. A systematic judge bias would be invisible until a human looks. This is
+accepted for v1 scope.
+
+**Scope.** This removes the human from the *evaluation harness only*. It does not
+touch the pipeline's human review stage, the SME escalation path, the
+no-auto-submission rule, or the never-granted `submitter` role — those remain
+CLAUDE.md golden rules and are unaffected. Human review is still the terminal
+stage of every run.
+
 ## Testing
 
 ```bash
