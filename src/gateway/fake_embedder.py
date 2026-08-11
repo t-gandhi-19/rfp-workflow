@@ -21,6 +21,8 @@ import hashlib
 import math
 import os
 
+from src.contracts.embedding import strip_task_prefix
+
 #: The opt-in. Deliberately verbose and unlikely to be set by accident.
 FAKE_EMBEDDINGS_ENV = "RFP_FAKE_EMBEDDINGS"
 
@@ -37,10 +39,19 @@ def fake_embedding(text: str, dimensions: int) -> list[float]:
     Built by hashing with a counter until enough bytes exist, so the result
     depends only on the text and the width — not on Python's hash seed, the
     platform, or the order things were embedded in.
+
+    **Task prefixes are stripped before hashing**, deliberately. The real model
+    embeds `search_document: X` and `search_query: X` into different vectors; if
+    this stand-in did the same, a CI query would never match its own corpus
+    entry and the vector-index tests would assert nothing. Stripping makes the
+    same text hash identically from either side, which turns CI into a clean
+    plumbing oracle: the right question is found because the ids line up, and
+    nothing about semantic quality is claimed either way.
     """
     if dimensions <= 0:
         raise ValueError("dimensions must be positive")
 
+    text = strip_task_prefix(text)
     needed = dimensions * 2
     material = bytearray()
     counter = 0

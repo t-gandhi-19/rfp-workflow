@@ -20,6 +20,20 @@ model:
   # Asserted by a real probe embedding in preflight, not assumed from docs.
   dimensions: 768
 
+  # nomic-embed-text is TRAINED WITH TASK PREFIXES. Sending raw text degrades
+  # retrieval: similarity compresses into a narrow band and topic discrimination
+  # weakens. That is not a theory — it is what was measured here before these
+  # were applied (cosine 0.649-1.0, mean 0.716; Recall@5 0.333; unanswerable
+  # questions matching). Stored corpus text uses the document prefix; an
+  # incoming question uses the query prefix, and the two are NOT
+  # interchangeable.
+  #
+  # Applied inside the embedding path from this config, never by callers.
+  # Changing either value invalidates every stored vector: run `make reembed`.
+  task_prefixes:
+    document: "search_document: "
+    query: "search_query: "
+
 index:
   name: question_embedding
   label: Question

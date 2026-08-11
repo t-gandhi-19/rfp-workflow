@@ -35,7 +35,12 @@ GATEWAY = GatewayClient(base_url="http://gateway.test", api_key="k")
 CONFIG = EmbeddingConfig.model_validate(
     {
         "version": 1,
-        "model": {"alias": "embed-model", "tag": "nomic-embed-text:v1.5", "dimensions": 768},
+        "model": {
+            "alias": "embed-model",
+            "tag": "nomic-embed-text:v1.5",
+            "dimensions": 768,
+            "task_prefixes": {"document": "search_document: ", "query": "search_query: "},
+        },
         "index": {
             "name": "question_embedding",
             "label": "Question",

@@ -25,7 +25,7 @@ from typing import Any
 
 from neo4j import AsyncSession
 
-from src.contracts.embedding import embedding_config
+from src.contracts.embedding import EmbedRole, embedding_config
 from src.gateway.client import GatewayClient
 from src.gateway.fake_embedder import fake_embeddings, fake_embeddings_enabled
 from src.graph.driver import close_driver, get_driver, normalise_name
@@ -194,7 +194,9 @@ async def _embed(texts: list[str]) -> list[list[float]]:
     alias = embedding_config().model.alias
     vectors: list[list[float]] = []
     for start in range(0, len(texts), BATCH):
-        vectors.extend(await client.embed(texts[start : start + BATCH], alias=alias))
+        vectors.extend(
+            await client.embed(texts[start : start + BATCH], alias=alias, role=EmbedRole.DOCUMENT)
+        )
 
     bad = [len(vector) for vector in vectors if len(vector) != dimensions]
     if bad:

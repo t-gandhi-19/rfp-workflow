@@ -29,7 +29,7 @@ from dataclasses import dataclass
 
 import httpx
 
-from src.contracts.embedding import EmbeddingConfig, embedding_config
+from src.contracts.embedding import EmbeddingConfig, EmbedRole, embedding_config
 from src.gateway.client import GatewayClient, GatewayError
 from src.gateway.model_pins import GatewayModel, drifting_models, parse_gateway_models
 from src.gateway.ollama_admin import installed_tags, is_installed
@@ -176,7 +176,10 @@ async def check_embedding_width(
     alias = config.model.alias
     try:
         vectors = await gateway.embed(
-            ["preflight probe: dimension check"], alias=alias, client=client
+            ["preflight probe: dimension check"],
+            alias=alias,
+            role=EmbedRole.QUERY,
+            client=client,
         )
     except GatewayError as exc:
         return CheckResult(
