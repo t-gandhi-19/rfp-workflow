@@ -257,6 +257,46 @@ no-auto-submission rule, or the never-granted `submitter` role — those remain
 CLAUDE.md golden rules and are unaffected. Human review is still the terminal
 stage of every run.
 
+### D17 addendum — the protected sliver is measured and accepted
+
+D17 split **relevance** (does this candidate qualify?) from **preference** (which
+of the qualifying ones wins), so that preference could reorder comparable
+candidates without overturning relevance outright. Reworking the scoring tests
+onto the commissioned band measured how much protection that actually leaves,
+and the answer was not the one the config claimed.
+
+**Measured, on corpus `a3d1eea3a24d6cb7` against `nomic-embed-text:v1.5`:**
+
+| Quantity | Value | Derivation |
+|---|---|---|
+| Achievable preference range | `[0.765, 1.265]` | worst `0.85 × 1.0 × 0.90`, best `1.15 × 1.1 × 1.00` |
+| Configured clamps | `[0.75, 1.30]` | **never bind** — the product cannot reach either |
+| Stated inversion boundary | 1.7333 | `clamp_max / clamp_min`, so it inherits the clamps' inertness |
+| **Real inversion boundary** | **1.6536** | `1.265 / 0.765` |
+| Widest ratio between two above-floor candidates | 1.6735 | `1.0 / 0.5975` |
+| **Protected sliver** | **0.0200** | `1.6735 − 1.6536` |
+
+**Decision: accepted as design, not a defect.** A candidate above the floor is by
+definition a match; preference deciding among matches is precisely D17's intent,
+not a failure of it. The invariant's real work is at the **floor boundary** — the
+line between answering and escalating — and the commissioned probe margins show
+it holding there with room to spare: the three unanswerables sit 0.3055, 0.2805
+and 0.1731 *below* the floor, the weakest answerable 0.2405 *above* it.
+
+The sliver is what remains above the floor, where both candidates already
+qualify and the stakes are ordering rather than qualification.
+
+**No constant moves without an observed failure.** The clamps stay, now commented
+as inert belt-and-braces that would bind only if the component multipliers
+changed. `scoring.yaml`'s boundary comment is corrected from 1.733 to the
+achievable 1.6536 with its derivation.
+
+**Enforcement.** `TestOrderingInTheCommissionedBand::test_the_preference_inversion_boundary_from_both_sides`
+drives the achievable boundary from both sides; testing 1.733 would assert a
+boundary the code cannot reach and would pass whether or not the real one held.
+`test_the_configured_clamps_never_actually_bind` pins the inertness, so a change
+to the multipliers that makes the clamps live fails loudly.
+
 ## Testing
 
 ```bash

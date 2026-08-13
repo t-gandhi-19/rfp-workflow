@@ -98,10 +98,33 @@ preference:
   # over a fresh answer that is merely adjacent.
   #   recency_pref = floor + (1 - floor) * exp(-age_days / half_life)
   recency_floor: 0.90
-  # Belt and braces on the product of outcome x evidence x recency_pref. With
-  # these bounds preference can only reorder candidates whose relevance ratio is
-  # below 1.30/0.75 = 1.733; beyond that no combination of preferences can
-  # invert them. Asserted by a boundary test.
+  # Belt and braces on the product of outcome x evidence x recency_pref.
+  #
+  # THESE CLAMPS ARE INERT ON THE SHIPPED MULTIPLIERS, and that is recorded
+  # rather than corrected. The product cannot reach either bound:
+  #
+  #   best   won x evidence x recency_pref(0)     = 1.15 * 1.1 * 1.00 = 1.265
+  #   worst  lost x none    x recency_pref(inf)   = 0.85 * 1.0 * 0.90 = 0.765
+  #
+  # So the REAL inversion boundary is 1.265 / 0.765 = 1.6536, not the 1.30/0.75
+  # = 1.733 this comment used to claim. The old figure was derived FROM the
+  # clamps and therefore inherited their inertness — it described a boundary the
+  # code cannot reach, which is why the boundary test now drives 1.6536 from both
+  # sides instead. A test of 1.733 would have passed whether or not the real
+  # boundary held.
+  #
+  # The clamps stay. They bind only if the component multipliers above ever
+  # change, which is exactly what belt-and-braces is for, and
+  # `test_the_configured_clamps_never_actually_bind` fails loudly if that
+  # happens so the boundary can be re-derived rather than silently moving.
+  #
+  # What this means for D17's guarantee is measured and ACCEPTED — see the
+  # "D17 addendum" register entry. Two candidates that both clear the 0.5975
+  # floor differ by at most 1.0/0.5975 = 1.6735, so preference can reorder all
+  # but a 0.0200-wide sliver of the qualifying range. Above the floor every
+  # candidate is a match and choosing among matches is what preference is for;
+  # the invariant's real work is at the floor boundary, where the commissioned
+  # probe margins show it holding. No constant moves without an observed failure.
   clamp_min: 0.75
   clamp_max: 1.30
 
