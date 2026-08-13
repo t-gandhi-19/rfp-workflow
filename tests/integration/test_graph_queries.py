@@ -186,12 +186,27 @@ class TestVectorSearch:
         rests on, so it is pinned against the live index.
 
         Compares the score `find_similar_questions` returns with the cosine
-        computed directly from the two stored vectors. The tolerance is 1e-3
-        because Neo4j stores vectors as float32 while the dot product here is
-        float64; that rounding is also the reason retrieval's cosine differs
-        slightly from calibration's, which is expected and far below the width
-        of the band.
+        computed directly from the two stored vectors.
+
+        THE TOLERANCE IS SET FROM WHAT THIS HAS TO DISCRIMINATE, not from an
+        observed difference. The two hypotheses are "the score is cos" and "the
+        score is (1 + cos) / 2"; at a cosine of 0.09 those are 0.09 and 0.545,
+        so they are separated by roughly 0.45. Anything comfortably under that
+        distinguishes them.
+
+        0.01 is therefore generous for the float32 noise — Neo4j stores vectors
+        as float32 while this dot product is float64, and the conversion doubles
+        that absolute error — while still being ~45x tighter than the fault it
+        exists to catch. An earlier 1e-3 was fitted to a single observation on
+        the real corpus and failed in CI at 1.4e-3 on the stand-in's vectors,
+        which is a tolerance describing one measurement rather than a claim.
+
+        That same rounding is why retrieval's cosine differs slightly from
+        calibration's; it is far below the 0.2788 width of the band.
         """
+        # The gap between the two hypotheses, so the assertion below is known to
+        # be capable of telling them apart.
+        discrimination = 0.01
         result = await session.run(
             "MATCH (q:Question) WHERE q.embedding IS NOT NULL "
             "RETURN q.id AS id, q.embedding AS e ORDER BY q.id LIMIT 1"
@@ -217,10 +232,18 @@ class TestVectorSearch:
 
         for hit in hits:
             expected = sum(a * b for a, b in zip(probe, stored[hit.question_id], strict=True))
-            assert hit.score == pytest.approx(expected, abs=1e-3), (
+            assert hit.score == pytest.approx(expected, abs=discrimination), (
                 f"{hit.question_id}: returned {hit.score:.6f}, true cosine {expected:.6f}. "
                 "If these differ by roughly (1+cos)/2, the index normalisation changed."
             )
+            # The other hypothesis, ruled out explicitly rather than by
+            # implication — except where the two coincide, at cos == 1.0.
+            unconverted = (1.0 + expected) / 2.0
+            if abs(unconverted - expected) > discrimination:
+                assert abs(hit.score - unconverted) > discrimination, (
+                    f"{hit.question_id}: the score matches the UNCONVERTED index value "
+                    f"{unconverted:.6f}, so the conversion is not being applied"
+                )
 
     async def test_the_scores_span_the_band_calibration_measured(
         self, session: AsyncSession
@@ -246,11 +269,15 @@ class TestVectorSearch:
             requesting_customer=MERIDIAN,
             k=20,
         )
-        # The probe matches itself at ~1.0; everything after it is a different
-        # subject and must sit in the background band, not above it.
-        others = [hit.score for hit in hits[1:]]
-        assert others, "expected more than one hit"
-        assert max(others) < 0.75, f"non-self hits reach {max(others):.4f}; band looks wrong"
+        # Near-duplicates are excluded, not assumed absent: the four
+        # supersession chains hold two records with BYTE-IDENTICAL question
+        # text, so a probe that happens to be a chain member has a legitimate
+        # twin at cosine ~1.0 in both the real and the stand-in geometry.
+        # Everything else is a different subject and must sit in the background
+        # band rather than above it.
+        others = [hit.score for hit in hits if hit.score < 0.99]
+        assert others, "expected hits beyond the probe and its duplicates"
+        assert max(others) < 0.75, f"non-duplicate hits reach {max(others):.4f}; band looks wrong"
 
     async def test_an_unknown_domain_returns_nothing(self, session: AsyncSession) -> None:
         hits = await queries.find_similar_questions(
