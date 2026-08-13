@@ -13,10 +13,11 @@ and produced eleven confusing failures.
 from __future__ import annotations
 
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
+from neo4j.exceptions import AuthError, ServiceUnavailable
 
 from src.contracts.embedding import EmbeddingConfig
 from src.gateway import preflight
@@ -206,6 +207,84 @@ class TestEmbeddingWidth:
         assert result.fix is not None and "make up" in result.fix
 
 
+class TestNeo4jAuth:
+    """Amendment Q. A healthcheck cannot see authentication.
+
+    Neo4j reports healthy as soon as it is listening, and `NEO4J_AUTH` applies
+    only when the data volume is FIRST initialised — so a volume created before
+    a credential change keeps the old password while compose, `.env` and the
+    container environment all agree on the new one. Everything reads as correct
+    and every connection is rejected.
+    """
+
+    async def test_a_rejected_credential_names_both_causes_in_order(self) -> None:
+        """The URI first, the stale volume second — that is the order to check.
+
+        A rejected credential looks identical whether the volume is stale or the
+        URI points at another project's Neo4j on the conventional port. Naming
+        only the volume sent one session to `make nuke` for a problem nuking
+        could not fix; the wrong port was the actual cause.
+        """
+        driver = MagicMock()
+        driver.verify_connectivity = AsyncMock(side_effect=AuthError("nope"))
+        driver.close = AsyncMock()
+        with patch.object(preflight, "AsyncGraphDatabase") as factory:
+            factory.driver.return_value = driver
+            result = await preflight.check_neo4j_auth(
+                {"NEO4J_URI": "bolt://localhost:7687", "NEO4J_PASSWORD": "x"}
+            )
+        assert result.ok is False
+        assert result.fix is not None
+        assert "NEO4J_BOLT_PORT_HOST" in result.fix
+        assert "stale" in result.fix
+        assert "make nuke" in result.fix
+        # The URI it actually dialled, so the wrong-server case is visible.
+        assert "bolt://localhost:7687" in result.detail
+
+    async def test_an_unreachable_server_is_distinguished_from_a_bad_password(self) -> None:
+        """Different causes, different fixes: start the stack vs reset the volume."""
+        driver = MagicMock()
+        driver.verify_connectivity = AsyncMock(side_effect=ServiceUnavailable("down"))
+        driver.close = AsyncMock()
+        with patch.object(preflight, "AsyncGraphDatabase") as factory:
+            factory.driver.return_value = driver
+            result = await preflight.check_neo4j_auth(
+                {"NEO4J_URI": "bolt://localhost:7687", "NEO4J_PASSWORD": "x"}
+            )
+        assert result.ok is False
+        assert result.fix is not None and "make up" in result.fix
+        assert "stale data volume" not in (result.fix or "")
+
+    async def test_a_missing_password_is_caught_before_dialling(self) -> None:
+        result = await preflight.check_neo4j_auth({"NEO4J_URI": "bolt://localhost:7687"})
+        assert result.ok is False
+        assert "NEO4J_PASSWORD is not set" in result.detail
+
+    async def test_accepted_credentials_pass(self) -> None:
+        driver = MagicMock()
+        driver.verify_connectivity = AsyncMock(return_value=None)
+        driver.close = AsyncMock()
+        with patch.object(preflight, "AsyncGraphDatabase") as factory:
+            factory.driver.return_value = driver
+            result = await preflight.check_neo4j_auth(
+                {"NEO4J_URI": "bolt://localhost:7687", "NEO4J_PASSWORD": "x"}
+            )
+        assert result.ok is True
+        driver.close.assert_awaited()
+
+    async def test_the_driver_is_closed_even_when_auth_fails(self) -> None:
+        """A leaked driver would keep the process alive after preflight exits."""
+        driver = MagicMock()
+        driver.verify_connectivity = AsyncMock(side_effect=AuthError("nope"))
+        driver.close = AsyncMock()
+        with patch.object(preflight, "AsyncGraphDatabase") as factory:
+            factory.driver.return_value = driver
+            await preflight.check_neo4j_auth(
+                {"NEO4J_URI": "bolt://localhost:7687", "NEO4J_PASSWORD": "x"}
+            )
+        driver.close.assert_awaited()
+
+
 class TestCalibrationFreshness:
     """Amendment J. Retrieval is fail-closed on the calibration artifact, so a
     missing or stale one should surface here rather than as a run refusing
@@ -266,6 +345,7 @@ class TestFullRun:
                 ollama_client=oc,
                 http_client=gc,
                 include_calibration=False,
+                include_neo4j=False,
             )
         # reachable + explicit-tags + one per distinct tag + width
         assert len(results) == 6
@@ -284,6 +364,7 @@ class TestFullRun:
                     gateway=GATEWAY,
                     ollama_client=oc,
                     http_client=gc,
+                    include_neo4j=False,
                 )
         assert len(results) == 7
         assert results[-1].ok is False
@@ -299,6 +380,7 @@ class TestFullRun:
                 ollama_client=oc,
                 http_client=gc,
                 include_calibration=False,
+                include_neo4j=False,
             )
         report = format_report(results)
         assert "3 check(s) failed" in report

@@ -234,7 +234,7 @@ calibration:
   #   last derived floor: 0.5975
   #   geometry:           query_x_document
   #   population:         query:any_family_member x document:indexed_originals
-  #   computed at:        2026-08-13T19:55:00+00:00
+  #   computed at:        2026-08-13T20:22:26+00:00
   #   embed model:        nomic-embed-text:v1.5
   #   body separation:    +0.2788
   #   tail separation:    -0.0245

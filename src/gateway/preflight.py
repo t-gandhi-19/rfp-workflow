@@ -28,6 +28,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import httpx
+from neo4j import AsyncGraphDatabase
+from neo4j.exceptions import AuthError, ServiceUnavailable
 
 from src.contracts.embedding import EmbeddingConfig, EmbedRole, embedding_config
 from src.gateway.client import GatewayClient, GatewayError
@@ -211,6 +213,66 @@ async def check_embedding_width(
     )
 
 
+async def check_neo4j_auth(env: dict[str, str]) -> CheckResult:
+    """The graph accepts the credentials in `.env` (amendment Q).
+
+    A healthcheck cannot see this. Neo4j reports healthy as soon as it is
+    listening, and `NEO4J_AUTH` is applied only when the data volume is FIRST
+    initialised — so a volume created before a credential change keeps the old
+    password forever while compose, `.env` and the container environment all
+    agree on the new one. Everything looks correct and every connection is
+    rejected.
+
+    The other cause is more mundane and, here, more likely: the URI points at a
+    DIFFERENT Neo4j. Another stack on this machine holds the conventional 7687,
+    and it rejects these credentials in exactly the same way. Both surface as an
+    AuthError from deep inside ingest, so the check reports the URI it actually
+    dialled and the fix names both causes in the order worth checking them.
+    """
+    name = "neo4j accepts the configured credentials"
+    uri = env.get("NEO4J_URI") or f"bolt://localhost:{env.get('NEO4J_BOLT_PORT_HOST', '7687')}"
+    user = env.get("NEO4J_USER", "neo4j")
+    password = env.get("NEO4J_PASSWORD", "")
+    if not password:
+        return CheckResult(
+            name=name,
+            ok=False,
+            detail="NEO4J_PASSWORD is not set",
+            fix="cp .env.example .env    # then set NEO4J_PASSWORD",
+        )
+
+    driver = AsyncGraphDatabase.driver(uri, auth=(user, password))
+    try:
+        await driver.verify_connectivity()
+    except AuthError:
+        return CheckResult(
+            name=name,
+            ok=False,
+            # The URI is in the detail because the likeliest cause is that it is
+            # the WRONG ONE. Another project's Neo4j on the conventional port
+            # will reject these credentials in exactly the same way a stale
+            # volume does, and the message that named only the volume sent one
+            # session to `make nuke` for a problem nuking could not fix.
+            detail=f"credentials rejected by {uri}",
+            fix=(
+                "check the URI above is THIS project's Neo4j (NEO4J_BOLT_PORT_HOST in .env; "
+                "another stack may hold the default port). If it is, the data volume is "
+                "stale from a prior password — NEO4J_AUTH applies only on first "
+                "initialisation — and make nuke resets it."
+            ),
+        )
+    except (ServiceUnavailable, OSError) as exc:
+        return CheckResult(
+            name=name,
+            ok=False,
+            detail=f"cannot reach Neo4j at {uri} ({type(exc).__name__})",
+            fix="make up            # the Neo4j container must be running",
+        )
+    finally:
+        await driver.close()
+    return CheckResult(name=name, ok=True, detail=f"{uri} accepted {user}")
+
+
 def check_calibration_is_fresh() -> CheckResult:
     """The calibration artifact exists and still describes this model and corpus.
 
@@ -254,6 +316,7 @@ async def run_preflight(
     ollama_client: httpx.AsyncClient | None = None,
     http_client: httpx.AsyncClient | None = None,
     include_calibration: bool = True,
+    include_neo4j: bool = True,
 ) -> list[CheckResult]:
     """Run every check and return all results — never short-circuit.
 
@@ -283,6 +346,10 @@ async def run_preflight(
     # The embedding model is the one alias with a deeper check: its output has a
     # fixed width that the Neo4j index depends on, and a mismatch is silent.
     results.append(await check_embedding_width(gw, resolved, client=http_client))
+    # Amendment Q. Runs in BOTH modes, including before ingest — a stale volume
+    # is exactly what blocks ingest, so the check that names it has to run first.
+    if include_neo4j:
+        results.append(await check_neo4j_auth(env))
     if include_calibration:
         results.append(check_calibration_is_fresh())
     return results

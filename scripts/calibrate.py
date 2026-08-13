@@ -212,6 +212,45 @@ def probe_report(landings: list[ProbeLanding], *, config: ScoringConfig | None =
     return "\n".join(lines)
 
 
+async def _ingest_token(client: httpx.AsyncClient) -> str:
+    """A `kg-writer` token for ingest-sa, fetched the way a service would.
+
+    `WRITE_API_TOKEN` short-circuits this when a caller already holds one, but
+    the default path is a real client-credentials grant: the calibration write
+    is authorized by the same service account that populates the graph, so it
+    appears in the Keycloak audit trail as itself rather than as whoever
+    happened to export a token.
+    """
+    existing = os.environ.get("WRITE_API_TOKEN", "").strip()
+    if existing:
+        return existing
+
+    port = os.environ.get("KEYCLOAK_PORT_HOST", "8080")
+    base = os.environ.get("KEYCLOAK_BASE") or f"http://localhost:{port}"
+    realm = os.environ.get("KEYCLOAK_REALM", "rfp")
+    secret = os.environ.get("INGEST_SA_SECRET", "")
+    if not secret:
+        raise CalibrationError(
+            "INGEST_SA_SECRET is not set, so no token can be obtained for the write-api. "
+            "Load .env, or set WRITE_API_TOKEN if you already hold one."
+        )
+
+    response = await client.post(
+        f"{base.rstrip('/')}/realms/{realm}/protocol/openid-connect/token",
+        data={
+            "grant_type": "client_credentials",
+            "client_id": "ingest-sa",
+            "client_secret": secret,
+        },
+    )
+    if response.status_code >= 300:
+        raise CalibrationError(
+            f"Keycloak refused the ingest-sa client-credentials grant "
+            f"({response.status_code}): {response.text[:200]}"
+        )
+    return str(response.json()["access_token"])
+
+
 async def persist(artifact: CalibrationArtifact) -> str:
     """Record the artifact in Postgres, through the write-api.
 
@@ -221,12 +260,12 @@ async def persist(artifact: CalibrationArtifact) -> str:
     """
     port = os.environ.get("WRITE_API_PORT", "8001")
     base = os.environ.get("WRITE_API_BASE") or f"http://localhost:{port}"
-    token = os.environ.get("WRITE_API_TOKEN", "")
     async with httpx.AsyncClient(timeout=30.0) as client:
+        token = await _ingest_token(client)
         response = await client.post(
             f"{base.rstrip('/')}/v1/calibration",
             json=artifact.model_dump(),
-            headers={"Authorization": f"Bearer {token}"} if token else {},
+            headers={"Authorization": f"Bearer {token}"},
         )
     if response.status_code >= 300:
         raise CalibrationError(
