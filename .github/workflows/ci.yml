@@ -225,6 +225,15 @@ jobs:
           export KEYCLOAK_BASE=http://localhost:${KEYCLOAK_PORT_HOST:-8080}
           export WRITE_API_BASE=http://localhost:${WRITE_API_PORT:-8001}
           export NEO4J_URI=bolt://localhost:${NEO4J_BOLT_PORT_HOST:-7687}
+          # DECLARED, not worked around. The graph these tests run against was
+          # ingested with the stand-in embedder two steps above, so the vectors
+          # in it ARE stand-in vectors — this makes the environment say what was
+          # already true. Without it, any test that asks how to embed gets the
+          # real answer and dials a LiteLLM this job never starts.
+          #
+          # The older tests hardcode `fake_embedding(...)`, which hid the gap:
+          # they could not have noticed the environment was not declaring it.
+          export RFP_FAKE_EMBEDDINGS=1
           uv run pytest tests/integration -q -m integration
 
       - name: Confirm the write actually landed in Postgres

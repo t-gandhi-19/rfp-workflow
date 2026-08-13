@@ -28,9 +28,7 @@ from src.gateway.fake_embedder import fake_embedding, fake_embeddings, fake_embe
 from src.graph import queries
 from src.graph.driver import close_driver, get_driver
 from src.retrieval.calibration import (
-    calibration_corpus,
     cosine,
-    indexed_ids,
     load_for_current_corpus,
 )
 from src.retrieval.units import EPSILON as UNITS_EPSILON
@@ -332,6 +330,10 @@ class TestVectorSearch:
         floor, so a units error shows up as a sign change rather than as a small
         numeric drift.
 
+        Both sides read the DOCUMENT vectors from the graph, so the comparison
+        isolates direct-dot-product versus index-score and does not also depend
+        on the query embedder matching the one the graph was ingested with.
+
         THE TOLERANCE IS THE CORROBORATION BAND, measured rather than chosen.
         When the units fix landed, the eval's probe margins reproduced the
         commissioning run's across all five probes with deltas of 0.0026, 0.0030,
@@ -343,14 +345,24 @@ class TestVectorSearch:
         """
         artifact = load_for_current_corpus()
         probe = next(q for q in golden_questions() if q["number"] == "2.7")
-
-        # Calibration's path: embed both sides directly, dot product, calibrate.
-        documents = sorted(indexed_ids(calibration_corpus()))
-        text_by_id = {row["question_id"]: row["question"] for row in calibration_corpus()}
-        document_vectors = await embed_texts(
-            [text_by_id[qid] for qid in documents], EmbedRole.DOCUMENT
-        )
         query_vector = (await embed_texts([probe["text"]], EmbedRole.QUERY))[0]
+
+        # BOTH PATHS USE THE SAME DOCUMENT VECTORS — the ones in the graph —
+        # so the only difference between them is direct dot product versus index
+        # score. That is the units question, and nothing else.
+        #
+        # An earlier version re-embedded the corpus for the direct side, which
+        # quietly made this a test of "does the query embedder match the one the
+        # graph was built with" as well. That is a real failure mode, but it is
+        # a different one, and conflating them would have made a units failure
+        # and an embedder mismatch produce the same message.
+        stored = await session.run(
+            "MATCH (q:Question) WHERE NOT q:Paraphrase AND q.embedding IS NOT NULL "
+            "RETURN q.embedding AS embedding"
+        )
+        document_vectors = [list(record["embedding"]) async for record in stored]
+        assert document_vectors, "no indexed originals to compare against"
+
         best_direct = max(cosine(query_vector, vector) for vector in document_vectors)
         direct_margin = artifact.derived_floor - artifact.calibrated(best_direct)
 
