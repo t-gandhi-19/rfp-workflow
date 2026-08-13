@@ -312,6 +312,15 @@ self-consistent, and consistently wrong against production.
 corpus and model drift, which an agreement test cannot. The two are
 complementary, and the lesson is about what a guard's *inputs* let it see.
 
+**Corollary, adopted as a rule: reorder, do not add a skip flag.** Adding the
+agreement check broke CI's step order — commissioning ran before ingest, when
+the index is empty, so the check refused correctly in the wrong place. The
+tempting fix is `--skip-units-check` for that one step. That flag is the thing
+that gets reached for later, by someone with less context and more urgency, and
+an empty sample staying a *failure* is precisely the property that stops this
+guard passing vacuously. The steps were reordered instead: populate, commission,
+then enforce.
+
 ### D17 addendum — the protected sliver is measured and accepted
 
 D17 split **relevance** (does this candidate qualify?) from **preference** (which
@@ -351,6 +360,52 @@ drives the achievable boundary from both sides; testing 1.733 would assert a
 boundary the code cannot reach and would pass whether or not the real one held.
 `test_the_configured_clamps_never_actually_bind` pins the inertness, so a change
 to the multipliers that makes the clamps live fails loudly.
+
+#### The golden-1.1 inversion — observed, ruled on, gated
+
+The sliver stopped being theoretical. Running the retrieval eval with **rerank
+off**, golden 1.1 — *"Describe the team model you would deploy… including named
+leadership roles"* — ranked:
+
+| rank 1 | answer | outcome | relevance | preference | final |
+|---|---|---|---|---|---|
+| with preference | **ANS-0032** (RACI model) | won | 0.8247 | ×1.1952 | 0.9857 |
+| without preference | **ANS-0037** (team model) | lost | 1.0000 | ×0.9046 | 0.9046 |
+
+The hand-written key names ANS-0037 "the only direct team-model answer", so
+ANS-0032 is **not** a valid substitute. The relevance ratio was 1.21 — inside the
+1.6536 achievable bound — so this is the sliver arithmetic behaving exactly as
+predicted, on a case where it should not have.
+
+**Classification: a masked finding.** Recall@5 reported 1.0000 throughout,
+because ANS-0037 sat at rank 2. Only the preference-decisive diagnostic — which
+gates nothing — noticed.
+
+**Identity worth recording:** the MRR delta that failed the ablation's AND rule
+*is* this one flip, `(1 − 0.5) / 15 = 0.0333`. The ablation decision and this
+finding are one phenomenon; the 33 minutes of rerank buy this specific
+correction.
+
+**Two things change:**
+
+1. **`rank1_accuracy` becomes a gated harness metric**, commissioned by ratchet
+   at the shipped configuration's current 15/15. Rank 1 is the drafter's primary
+   source — the citation, and the input to the confidence formula — and Recall@5
+   is structurally blind to a wrong one. This is the eval that would have caught
+   1.1 without the diagnostic's luck.
+2. **The rerank coupling is recorded in `scoring.yaml`**, where the next
+   decision will be made: any future proposal to disable rerank re-evaluates this
+   finding first, not only the deltas.
+
+**One thing deliberately does not change: no preference constant moves.** One
+observation, in a non-shipped arm, corrected by the shipped configuration, now
+gated. Narrowing the specified ±15% outcome multipliers to protect a 1.21 ratio
+would gut preference's intended role over a single masked instance. The stance
+above holds — accepted, measured, documented, and now gated.
+
+If `rank1_accuracy` ever fails **in the shipped configuration**, that is the
+observed failure that reopens the preference-span question, and it is escalated
+with the candidate pair.
 
 ## Testing
 

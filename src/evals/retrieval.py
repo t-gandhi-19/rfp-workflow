@@ -20,10 +20,19 @@ WHAT IS ZERO TOLERANCE, and why each one is not a percentage:
                           own, so it can only duplicate a candidate already
                           present.
 
-Recall@5 is gated at 0.8 and MRR is REPORTED. Recall answers "did the right
-answer reach the drafter at all", which is the question the pipeline's behaviour
-depends on; MRR describes how comfortably, which is worth watching and not worth
-failing a build over.
+Recall@5 is gated at 0.8, rank-1 accuracy is gated by ratchet, and MRR is
+REPORTED. The two gates answer different questions and neither subsumes the
+other:
+
+    Recall@5           did the right answer reach the drafter AT ALL?
+    rank1_accuracy     was it the drafter's PRIMARY SOURCE — the one cited, and
+                       the one the confidence formula keys on?
+
+Recall@5 is structurally blind to the second. On golden 1.1 with rerank off it
+reported 1.0000 while the primary source was a WON answer on a neighbouring
+topic, ahead of the one the key calls the only direct answer. MRR describes how
+comfortably the set ranked, which is worth watching and not worth failing a
+build over.
 
 ATTRIBUTION IS PART OF THE RESULT, not a debugging aid. Every candidate carries
 raw -> calibrated -> preference -> final, because a ranking nobody can account
@@ -71,6 +80,31 @@ RECALL_AT_5_THRESHOLD = 0.8
 
 #: How deep "Recall@5" looks.
 RECALL_K = 5
+
+#: RANK-1 PRIMARY-SOURCE ACCURACY. Commissioned, and gated by ratchet.
+#:
+#: WHY IT EXISTS. Recall@5 is structurally blind to a rank-1 error whenever the
+#: right answer is anywhere in the top five — and rank 1 is not one candidate
+#: among five, it is the DRAFTER'S PRIMARY SOURCE, the one the citation names
+#: and the one the confidence formula keys on.
+#:
+#: That blindness was not hypothetical. On golden 1.1, with rerank off, ANS-0032
+#: (a WON RACI answer, preference x1.1952) outranked ANS-0037 — which the
+#: hand-written key calls "the only direct team-model answer" — because
+#: preference overturned a relevance gap of 1.0000 vs 0.8247. Recall@5 reported
+#: 1.0000 throughout. The flip was noticed only by the preference-decisive
+#: diagnostic, which is a diagnostic and gates nothing.
+#:
+#: COMMISSIONED at 1.0 — 15 of 15 — measured in the SHIPPED configuration
+#: (rerank enabled) on 2026-08-13, corpus a3d1eea3a24d6cb7, against
+#: nomic-embed-text:v1.5. This commissions a gate the system currently passes,
+#: which is the legitimate case for a ratchet: it defends a property that holds
+#: now against a future that erodes it.
+#:
+#: A NON-SHIPPED ARM MAY FAIL THIS, and that is the gate working rather than a
+#: false positive: the rerank-off arm scores 14/15 precisely because of the 1.1
+#: inversion. The category's verdict is a claim about the shipped configuration.
+COMMISSIONED_RANK1_ACCURACY = 1.0
 
 #: The confidential answer. Reachable to Bluepine, never to Meridian.
 CONFIDENTIAL_ANSWER_ID = "ANS-0014"
@@ -156,6 +190,23 @@ class RetrievalRun:
             return 0.0
         total = sum(1.0 / o.rank_of_expected if o.rank_of_expected else 0.0 for o in expected)
         return total / len(expected)
+
+    @property
+    def rank1_accuracy(self) -> float:
+        """How often the DRAFTER'S PRIMARY SOURCE is the expected answer.
+
+        Not a softer Recall@1: it is the metric that sees what Recall@5 cannot,
+        which is a wrong answer at rank 1 with the right one just behind it.
+        """
+        expected = self.expected_matches
+        if not expected:
+            return 0.0
+        return sum(1 for o in expected if o.rank_of_expected == 1) / len(expected)
+
+    @property
+    def rank1_misses(self) -> list[QuestionOutcome]:
+        """The questions whose primary source is not the expected answer."""
+        return [o for o in self.expected_matches if o.rank_of_expected != 1]
 
     @property
     def no_match_numbers(self) -> set[str]:
@@ -440,11 +491,37 @@ def to_category_result(run: RetrievalRun) -> CategoryResult:
             f"{len(run.expected_matches)} expected answers in the top {RECALL_K}",
         ),
         EvalMetric(
+            key="rank1_accuracy",
+            label="Rank-1 primary-source accuracy",
+            value=round(run.rank1_accuracy, 4),
+            direction=MetricDirection.HIGHER_IS_BETTER,
+            threshold=COMMISSIONED_RANK1_ACCURACY,
+            passed=run.rank1_accuracy >= COMMISSIONED_RANK1_ACCURACY,
+            detail=(
+                f"{sum(1 for o in run.expected_matches if o.rank_of_expected == 1)}/"
+                f"{len(run.expected_matches)} — rank 1 is the drafter's primary source and "
+                f"what the confidence formula keys on, which Recall@5 cannot see. "
+                f"Ratchet: commissioned at {COMMISSIONED_RANK1_ACCURACY} in the shipped "
+                f"configuration; any regression fails."
+                + (
+                    f" MISSES: {
+                        ', '.join(
+                            f'{o.number} (expected {o.expected_answer_id}, got '
+                            f'{o.rank1_with_preference} at rank 1)'
+                            for o in run.rank1_misses
+                        )
+                    }"
+                    if run.rank1_misses
+                    else ""
+                )
+            ),
+        ),
+        EvalMetric(
             key="mrr",
             label="Mean reciprocal rank",
             value=round(run.mrr, 4),
             direction=MetricDirection.HIGHER_IS_BETTER,
-            detail="reported, not gated — Recall@5 carries the pass/fail",
+            detail="reported, not gated — Recall@5 and rank-1 accuracy carry the pass/fail",
         ),
         EvalMetric(
             key="no_match_gate",

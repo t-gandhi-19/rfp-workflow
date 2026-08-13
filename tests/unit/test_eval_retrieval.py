@@ -16,6 +16,7 @@ from src.evals.contracts import CategoryStatus, Violation
 from src.evals.retrieval import (
     CHAIN_HEADS,
     CHAIN_SUPERSEDED,
+    COMMISSIONED_RANK1_ACCURACY,
     CONFIDENTIAL_ANSWER_ID,
     RECALL_AT_5_THRESHOLD,
     CandidateAttribution,
@@ -328,8 +329,93 @@ class TestCategoryResult:
         gated = {m.key for m in result.metrics if m.passed is not None}
         assert gated == {
             "recall_at_5",
+            "rank1_accuracy",
             "no_match_gate",
             "staleness",
             "confidentiality",
             "paraphrase_exclusion",
         }
+
+
+class TestRank1PrimarySourceAccuracy:
+    """The gate that would have caught golden 1.1 without needing luck.
+
+    Recall@5 is blind to a wrong rank 1 whenever the right answer is anywhere in
+    the top five. Rank 1 is the drafter's primary source — cited, and the input
+    to the confidence formula — so it gets its own gate.
+    """
+
+    def test_a_perfect_run_scores_one(self) -> None:
+        assert healthy_run().rank1_accuracy == 1.0
+
+    def test_the_golden_1_1_shape_is_caught(self) -> None:
+        """Expected answer present at rank 2. Recall passes; this must not.
+
+        The exact shape observed with rerank off: 14 of 15 at rank 1, the
+        fifteenth at rank 2 behind a candidate preference promoted.
+        """
+        run = healthy_run()
+        run.outcomes = [
+            outcome(
+                o.number,
+                o.kind,
+                expected=o.expected_answer_id,
+                rank=2,
+                rank1="ANS-0032",
+                rank1_no_pref=o.expected_answer_id,
+            )
+            if o.number == "a2"
+            else o
+            for o in run.outcomes
+        ]
+        assert run.recall_at_5 == 1.0, "Recall@5 is blind to this, which is the point"
+        assert run.rank1_accuracy == pytest.approx(14 / 15)
+
+        result = to_category_result(run)
+        metric = next(m for m in result.metrics if m.key == "rank1_accuracy")
+        assert metric.passed is False
+        assert result.status is CategoryStatus.FAIL
+
+    def test_the_failure_names_the_question_and_both_candidates(self) -> None:
+        """A gate that says only "0.9333" obliges someone to reproduce it."""
+        run = healthy_run()
+        run.outcomes = [
+            outcome(
+                o.number,
+                o.kind,
+                expected="ANS-0037",
+                rank=2,
+                rank1="ANS-0032",
+                rank1_no_pref="ANS-0037",
+            )
+            if o.number == "a2"
+            else o
+            for o in run.outcomes
+        ]
+        metric = next(m for m in to_category_result(run).metrics if m.key == "rank1_accuracy")
+        assert metric.detail is not None
+        assert "a2" in metric.detail
+        assert "ANS-0037" in metric.detail
+        assert "ANS-0032" in metric.detail
+
+    def test_it_is_commissioned_at_the_shipped_value(self) -> None:
+        """Ratchet, not a chosen threshold: any regression from 15/15 fails."""
+        assert COMMISSIONED_RANK1_ACCURACY == 1.0
+        metric = next(
+            m for m in to_category_result(healthy_run()).metrics if m.key == "rank1_accuracy"
+        )
+        assert metric.threshold == COMMISSIONED_RANK1_ACCURACY
+
+    def test_misses_are_listed_for_action(self) -> None:
+        run = healthy_run()
+        run.outcomes = [
+            outcome(o.number, o.kind, expected=o.expected_answer_id, rank=3)
+            if o.number in ("a2", "a3")
+            else o
+            for o in run.outcomes
+        ]
+        assert {o.number for o in run.rank1_misses} == {"a2", "a3"}
+
+    def test_a_never_retrieved_answer_is_also_a_rank1_miss(self) -> None:
+        run = RetrievalRun(outcomes=[outcome("a", "answerable", expected="ANS-1", rank=None)])
+        assert run.rank1_accuracy == 0.0

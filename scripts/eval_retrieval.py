@@ -47,6 +47,16 @@ def summary(run: RetrievalRun) -> str:
             lines.append(f"      {metric.detail}")
     lines.append("")
 
+    if run.rank1_misses:
+        lines.append("  RANK-1 PRIMARY-SOURCE MISSES (what Recall@5 cannot see):")
+        for miss in run.rank1_misses:
+            lines.append(
+                f"    {miss.number}  expected {miss.expected_answer_id} at rank 1, "
+                f"got {miss.rank1_with_preference} (rank {miss.rank_of_expected} without "
+                f"preference: {miss.rank1_without_preference})"
+            )
+        lines.append("")
+
     lines.append("  per question:")
     lines.append(
         f"    {'no.':<5} {'kind':<13} {'status':<9} {'expected':<10} {'rank':<5} "

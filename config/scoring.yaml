@@ -77,7 +77,25 @@ rerank:
   #
   # So the cost buys a specific thing rather than a general feeling: it corrects
   # the one case in this set where preference decided a ranking relevance should
-  # have decided. Reassess if the corpus or the preference multipliers change.
+  # have decided.
+  #
+  # THE COUPLING, recorded where the next decision will be made:
+  #
+  #   Rerank ON also corrects the golden-1.1 PRIMARY-SOURCE INVERSION. The MRR
+  #   delta that failed the AND rule IS that one flip — (1 - 0.5) / 15 = 0.0333 —
+  #   so the ablation decision and the 1.1 finding are one phenomenon, not two
+  #   coincident ones.
+  #
+  #   ANY FUTURE PROPOSAL TO DISABLE RERANK MUST RE-EVALUATE THAT FINDING FIRST,
+  #   not only the deltas. Deltas on a different corpus could easily fall inside
+  #   both thresholds while the inversion persists; shipping rerank off then
+  #   would reintroduce a wrong primary source silently.
+  #
+  #   The eval harness now gates `rank1_accuracy` (commissioned 15/15 in this
+  #   configuration), so that reintroduction fails loudly rather than passing on
+  #   a Recall@5 that cannot see it. See the D17 addendum register entry.
+  #
+  # Reassess if the corpus or the preference multipliers change.
   enabled: true
   # Gateway alias. Application code never names the model.
   alias: rerank-model
