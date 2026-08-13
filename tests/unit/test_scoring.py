@@ -14,9 +14,9 @@ questions:
                   that works out to 0.8333 rather than 0.7424 makes the
                   derivation readable in the assertion.
 
-    COMMISSIONED  the artifact retrieval actually reads, loaded from
-                  fixtures/calibration.json. Used for every property that is
-                  about BEHAVIOUR on this corpus.
+    COMMISSIONED  the measured anchors, TRANSCRIBED from the commissioning run.
+                  Used for every property that is about BEHAVIOUR on this
+                  corpus.
 
 The second exists because the first cannot answer the operational question. The
 measured band is narrow — bg_p50 0.4930 to same_p50 0.7718, a span of 0.2788 —
@@ -24,18 +24,31 @@ and that narrowness is the entire reason calibration exists. Ordering and floor
 properties asserted only on a band two or three times wider would demonstrate
 the arithmetic while saying nothing about whether the shipped floor of 0.5975
 separates anything, which is the claim that matters.
+
+TRANSCRIBED, NOT LOADED (amendment R). Reading fixtures/calibration.json here
+made this module — and therefore all of tests/unit — uncollectable on a clean
+clone, because that file is gitignored and exists only after `make calibrate`.
+Transcription is self-checking rather than trusted: the floor is re-derived from
+the anchors through the config rule, and the corpus hash is recomputed from the
+committed corpus, so neither a typo nor a drifted corpus can pass.
 """
 
 from __future__ import annotations
 
 import math
-from pathlib import Path
 
 import pytest
 
 from src.contracts import Outcome, RetrievalStatus, ScoredCandidate
 from src.contracts.thresholds import scoring_config
-from src.retrieval.calibration import GEOMETRY, POPULATION, CalibrationArtifact
+from src.retrieval.calibration import (
+    GEOMETRY,
+    POPULATION,
+    CalibrationArtifact,
+    calibration_corpus,
+    corpus_hash,
+    derive_floor,
+)
 from src.retrieval.scoring import (
     CandidateInput,
     blend,
@@ -99,25 +112,43 @@ CALIBRATION = CalibrationArtifact(
 
 
 # ---------------------------------------------------------------------------
-# The COMMISSIONED artifact — the real one, as shipped.
+# The COMMISSIONED artifact — the measured anchors, TRANSCRIBED, not loaded.
 #
-# The synthetic artifact above exists so the ARITHMETIC can be checked by hand
-# against numbers that divide cleanly. It cannot tell anyone whether the shipped
-# scoring behaves sensibly on the band this corpus actually produces, because
-# its anchors are invented.
+# AMENDMENT R. This used to read fixtures/calibration.json at import time. That
+# file is gitignored by design (amendment J): it is bound to the embedding model
+# tag and corpus hash it was measured against, so a committed copy would be
+# loaded on a machine whose model may differ. It therefore exists only on a host
+# that has run `make calibrate` — and on a clean clone, collecting this module
+# raised FileNotFoundError and took the whole of tests/unit down with it.
 #
-# So the properties that matter operationally — the ones the retrieval evals
-# depend on — are asserted against the measured artifact instead. Loaded rather
-# than copied, so it cannot drift from the file retrieval reads; the numbers it
-# is expected to hold are pinned once, in
-# `TestTheCommissionedStatisticsAreWhatTheseTestsAssume`, so a recalibration
-# fails there with a readable diff instead of scattering failures across the
-# file.
+# It was invisible locally for exactly the reason the make-wiring fault was: the
+# host had the file, so the habit that verifies the work could not see the
+# failure. CI could, and did, at 0dba376 — exit code 2, one collection error.
+#
+# So the anchors are TRANSCRIBED from the commissioning run. Full precision, so
+# the hand-computed chains below stay exact. This deliberately makes the
+# commissioned statistics part of the source: a re-commissioning that moves them
+# now fails `TestTheCommissionedStatisticsAreWhatTheseTestsAssume` with a
+# readable diff, which is the escalation the register asks for rather than a
+# silent follow-along.
+#
+# Source of record: `make calibrate` at 2026-08-13T20:22:26+00:00 over corpus
+# a3d1eea3a24d6cb7 against nomic-embed-text:v1.5.
 # ---------------------------------------------------------------------------
-COMMISSIONED = CalibrationArtifact.model_validate_json(
-    (Path(__file__).resolve().parents[2] / "fixtures" / "calibration.json").read_text(
-        encoding="utf-8"
-    )
+COMMISSIONED = CalibrationArtifact(
+    geometry=GEOMETRY,
+    population=POPULATION,
+    embed_model_tag="nomic-embed-text:v1.5",
+    corpus_hash="a3d1eea3a24d6cb7",
+    computed_at="2026-08-13T20:22:26+00:00",
+    background_pair_count=5752,
+    same_topic_pair_count=128,
+    bg_p50=0.4930148971911999,
+    bg_p95=0.6192618897711936,
+    bg_p99=0.6718287596779553,
+    same_topic_p05=0.6473782454757817,
+    same_topic_p50=0.7718081878021841,
+    derived_floor=0.5975344852115505,
 )
 
 #: The width of the measured band. Every calibrated value below is a position in
@@ -347,6 +378,42 @@ class TestTheCommissionedStatisticsAreWhatTheseTestsAssume:
 
     def test_the_derived_floor(self) -> None:
         assert COMMISSIONED.derived_floor == pytest.approx(0.5975, abs=5e-5)
+
+    def test_the_floor_still_follows_from_the_derivation_rule(self) -> None:
+        """The transcription is self-checking.
+
+        Amendment R transcribes the anchors instead of loading them, which
+        raises the obvious question: what stops a typo? This. The floor is not
+        an independent number — it is `derive_floor` applied to the anchors and
+        the rule in scoring.yaml — so a mistyped anchor or a mistyped floor
+        cannot agree with each other by accident.
+        """
+        assert derive_floor(COMMISSIONED) == pytest.approx(COMMISSIONED.derived_floor, abs=1e-12)
+
+    def test_the_transcribed_hash_still_describes_the_committed_corpus(self) -> None:
+        """The other half of the self-check, and the one that catches drift.
+
+        The anchors describe the corpus that produced them. `qa_pairs.json` and
+        `question_paraphrases.json` are COMMITTED, so this can be verified
+        without the gitignored artifact: if the corpus changes, its hash moves
+        and these anchors stop describing it — which is an escalation, and now
+        a failing unit test on a clean clone rather than a surprise at runtime.
+        """
+        assert corpus_hash(calibration_corpus()) == COMMISSIONED.corpus_hash
+
+    def test_the_commissioned_probe_baselines(self) -> None:
+        """D19's tier-2 baselines. Committed in scoring.yaml, pinned here.
+
+        Included for the same reason as the anchors: these were measured once,
+        and a re-commissioning that moves them is a decision, not a detail.
+        """
+        commissioned = CONFIG.calibration.separation_guards.floor_discrimination.commissioned
+        assert commissioned.unanswerable_2_7 == 0.3055
+        assert commissioned.unanswerable_2_8 == 0.2805
+        assert commissioned.unanswerable_3_5 == 0.1731
+        assert commissioned.min_answerable == 0.2405
+        assert CONFIG.calibration.separation_guards.floor_discrimination.retention == 0.6
+        assert CONFIG.calibration.separation_guards.body_min == 0.1394
 
     def test_the_population_it_was_measured_over(self) -> None:
         """D18. The anchors describe one population and no other."""
