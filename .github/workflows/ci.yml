@@ -113,12 +113,22 @@ jobs:
         if: always()
         run: docker compose --profile infra --profile app ps
 
-      - name: Apply graph schema (twice — it must be idempotent)
+      # THROUGH THE MAKE TARGET, not `python -m scripts.apply_schema`.
+      #
+      # The recipe is a layer nothing used to execute. `make preflight` shipped
+      # without HOST_NEO4J and dialled the compose service name from the host,
+      # and neither the unit suite nor this job noticed — because this job
+      # invoked the modules directly with its own NEO4J_URI export, supplying by
+      # hand exactly what the broken recipe failed to supply. Running the target
+      # means the wiring is exercised rather than bypassed.
+      #
+      # No NEO4J_URI export here on purpose: HOST_NEO4J is what must provide it.
+      # Re-adding one would restore the blind spot.
+      - name: Apply graph schema through its make target (twice — it must be idempotent)
         run: |
           set -a && source .env && set +a
-          export NEO4J_URI=bolt://localhost:${NEO4J_BOLT_PORT_HOST:-7687}
-          uv run python -m scripts.apply_schema
-          uv run python -m scripts.apply_schema
+          make apply-schema
+          make apply-schema
 
       - name: Ingest fixtures with the deterministic stand-in embedder
         run: |
