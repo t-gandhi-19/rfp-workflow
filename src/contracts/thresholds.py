@@ -14,7 +14,7 @@ from __future__ import annotations
 import os
 from functools import lru_cache
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field
@@ -52,17 +52,18 @@ class RerankConfig(BaseModel):
 
 
 class RetrievalConfig(BaseModel):
+    """No match floor here, deliberately (amendment O).
+
+    The floor is derived from corpus statistics and lives in the calibration
+    artifact. `extra="forbid"` is what makes that stick: a config still carrying
+    `match_floor` or `match_floor_calibrated` is rejected at load rather than
+    quietly resolving to a stale value in unknown units.
+    """
+
     model_config = ConfigDict(extra="forbid")
 
     top_k: int = Field(gt=0)
     rerank_top_n: int = Field(gt=0)
-    #: In CALIBRATED space, compared against `relevance` — not a cosine.
-    #:
-    #: `extra="forbid"` plus the rename from `match_floor` (amendment L) is what
-    #: turns a stale reference into a load-time failure: a config still carrying
-    #: the old key is rejected outright rather than quietly falling back to a
-    #: default in the wrong units.
-    match_floor_calibrated: float = Field(ge=0.0, le=1.0)
 
 
 class OutcomeMultipliers(BaseModel):
@@ -106,6 +107,22 @@ class PreferenceConfig(BaseModel):
     clamp_max: float = Field(gt=0.0)
 
 
+class FloorDerivation(BaseModel):
+    """HOW the floor is computed. The value it computes to lives in the artifact.
+
+    The anchor names are constrained to real artifact fields rather than left as
+    free strings: they are used to read attributes off the artifact, and a typo
+    should fail at config load rather than at the first retrieval.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    background_anchor: Literal["bg_p50", "bg_p95", "bg_p99"]
+    same_topic_anchor: Literal["same_topic_p05", "same_topic_p50"]
+    #: 0.0 sits on the background anchor, 1.0 on the same-topic anchor.
+    midpoint_weight: float = Field(ge=0.0, le=1.0)
+
+
 class CalibrationSettings(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -114,6 +131,7 @@ class CalibrationSettings(BaseModel):
     #: In RAW cosine. It is a gap between two raw percentiles measured before
     #: any mapping exists, so it has no calibrated form (amendment L audit).
     min_separation_raw: float = Field(ge=0.0)
+    floor_derivation: FloorDerivation
 
 
 class ScoringConfig(BaseModel):

@@ -239,7 +239,7 @@ def check_calibration_is_fresh() -> CheckResult:
         detail=(
             f"measured {artifact.computed_at} over corpus {artifact.corpus_hash}; "
             f"separation {artifact.separation:+.4f}, "
-            f"derived floor {artifact.derived_floor():.4f}"
+            f"derived floor {artifact.derived_floor:.4f}"
         ),
     )
 

@@ -11,30 +11,27 @@ retrieval:
   top_k: 20
   # How many survive into the single batched rerank call.
   rerank_top_n: 8
-  # No candidate at or above this RELEVANCE => NO_MATCH => the drafter must
-  # escalate rather than invent an answer.
+  # THERE IS NO MATCH FLOOR KEY HERE, deliberately (amendment O).
   #
-  # THE SUFFIX IS THE POINT (amendment L). This number lives in CALIBRATED space
-  # — the [0, 1] that src/retrieval/calibration.py maps raw cosine onto, where 0
-  # is "indistinguishable from an unrelated question" and 1 is "as close as a
-  # genuine paraphrase". It is NOT a cosine.
+  # The floor is a MEASUREMENT, not a setting. It is derived by `make calibrate`
+  # from corpus statistics and stored in the calibration artifact, which is what
+  # retrieval reads at runtime. See `calibration.floor_derivation` below for the
+  # rule that produces it.
   #
-  # It was called `match_floor` and held 0.55, a value chosen for calibrated
-  # space but compared against raw cosine, where nomic-embed-text puts every
-  # real score above 0.55. The floor was therefore unreachable from below and
-  # rejected nothing, while the config still read as though a floor applied. The
-  # old key is REMOVED rather than aliased, so a stale reference fails at config
-  # load instead of silently resolving to the wrong units.
+  # Two earlier shapes of this key both failed, in opposite directions:
   #
-  # DERIVED, NOT CHOSEN. Recomputed by `make calibrate` per the midpoint rule in
-  # CalibrationArtifact.derived_floor: halfway between calibrated(bg_p99), the
-  # highest an unrelated question scores, and calibrated(same_topic_p05), the
-  # lowest a genuine match scores. Replacing this value by hand without the
-  # statistics that justify it is the thing the rename exists to prevent.
+  #   `match_floor: 0.55`            — a calibrated-space value compared against
+  #                                    raw cosine, which every real score
+  #                                    exceeded. The floor rejected nothing while
+  #                                    the config read as though one applied.
+  #                                    (amendment L renamed it.)
+  #   `match_floor_calibrated: 0.50` — right units, but a placeholder shipped as
+  #                                    a runtime-consumed value: known-wrong
+  #                                    until someone remembered to overwrite it,
+  #                                    and wrong silently until they did.
   #
-  # STATUS: placeholder pending the first real-model `make calibrate`. The
-  # derivation, its geometry and its date are recorded here when it lands.
-  match_floor_calibrated: 0.50
+  # Both keys are REMOVED rather than aliased, so a stale reference fails at
+  # config load instead of resolving to something plausible.
 
 rerank:
   # Stage C: ONE batched call per question, scoring the surviving candidates
@@ -136,6 +133,32 @@ calibration:
   # cannot be expressed in calibrated space: calibration is what the separation
   # has to be sufficient to justify computing.
   min_separation_raw: 0.02
+
+  # HOW the floor is derived, which is what belongs in config. The VALUE it
+  # derives to belongs in the artifact (amendment O).
+  #
+  # The floor sits inside the gap between the highest an unrelated question
+  # scores and the lowest a genuine match scores — the widest defensible gap the
+  # statistics offer. `midpoint_weight` chooses where in that gap:
+  #   0.0 sits on the background anchor  (permissive: admits near-background)
+  #   1.0 sits on the same-topic anchor  (strict: rejects the weakest matches)
+  #   0.5 splits the difference
+  #
+  # Changing any of these changes what the floor MEANS, so it invalidates the
+  # stored artifact: re-run `make calibrate`.
+  floor_derivation:
+    background_anchor: bg_p99
+    same_topic_anchor: same_topic_p05
+    midpoint_weight: 0.5
+
+  # GENERATED — do not hand-edit. Written by `make calibrate` so a human reading
+  # this file can see what the rule above last produced, without opening the
+  # artifact. Retrieval never reads these lines.
+  #
+  #   last derived floor: (not yet computed against real embeddings)
+  #   geometry:           query_x_document
+  #   computed at:        —
+  #   embed model:        —
 
 graph_multiplier:
   # Applied to vector_score before blending. Encodes what the graph knows that

@@ -32,7 +32,19 @@ CONFIG = scoring_config()
 WON, UNKNOWN, LOST = 1.15, 1.0, 0.85
 DECAY_DAYS = 540
 EVIDENCE = 1.1
-FLOOR = 0.50
+
+# The floor is DERIVED and lives in the artifact (amendment O), so it is stated
+# here as the arithmetic that produces it rather than copied from config:
+#   calibrated(bg_p99 0.75)         = (0.75 - 0.60) / 0.30 = 0.50
+#   calibrated(same_topic_p05 0.84) = (0.84 - 0.60) / 0.30 = 0.80
+#   midpoint (weight 0.5)           = 0.65
+#
+# The anchors are chosen to divide EXACTLY. An earlier set gave a floor of
+# 0.6666..., and storing it rounded to 0.666667 made a candidate whose relevance
+# was exactly 0.6666... fall below its own floor — a rounding artifact that
+# would read as a scoring bug. Real artifacts carry full float precision; the
+# test fixture should not introduce a precision problem the real one lacks.
+FLOOR = 0.65
 
 # A calibration artifact with anchors in a realistic band for a prefixed
 # nomic-embed-text corpus, chosen to divide cleanly so every value below can be
@@ -58,8 +70,9 @@ CALIBRATION = CalibrationArtifact(
     bg_p50=0.60,
     bg_p95=0.72,
     bg_p99=0.75,
-    same_topic_p05=0.85,
+    same_topic_p05=0.84,
     same_topic_p50=0.90,
+    derived_floor=FLOOR,
 )
 
 
@@ -97,19 +110,27 @@ class TestConfigIsWhatTheseTestsAssume:
         assert CONFIG.graph_multiplier.recency.decay_days == DECAY_DAYS
         assert CONFIG.graph_multiplier.evidence_bonus == EVIDENCE
 
-    def test_floor_and_weights(self) -> None:
-        assert CONFIG.retrieval.match_floor_calibrated == FLOOR
+    def test_weights(self) -> None:
         assert CONFIG.final_score.weights.vector_graph == 0.5
         assert CONFIG.final_score.weights.rerank == 0.5
 
-    def test_the_old_raw_units_key_is_gone(self) -> None:
-        """Amendment L removed `match_floor` rather than aliasing it.
+    def test_config_holds_no_floor_value_at_all(self) -> None:
+        """Amendments L and O, together.
 
-        An alias would have kept every stale reference working while silently
-        resolving to the wrong units — which is the failure the rename exists to
-        end, not to preserve.
+        L removed `match_floor` rather than aliasing it, because an alias keeps
+        every stale reference working while resolving to the wrong units. O then
+        removed `match_floor_calibrated` too: right units, but a derived value
+        living in config is a placeholder waiting to be forgotten, and it
+        shipped once as a known-wrong 0.50 that retrieval consumed at runtime.
         """
         assert not hasattr(CONFIG.retrieval, "match_floor")
+        assert not hasattr(CONFIG.retrieval, "match_floor_calibrated")
+
+    def test_config_holds_the_derivation_rule_instead(self) -> None:
+        rule = CONFIG.calibration.floor_derivation
+        assert rule.background_anchor == "bg_p99"
+        assert rule.same_topic_anchor == "same_topic_p05"
+        assert rule.midpoint_weight == 0.5
 
 
 class TestCalibrationIsRequired:
@@ -373,58 +394,89 @@ class TestMatchFloor:
     real cosine exceeds is not a floor.
     """
 
-    #: The raw cosine that calibrates to exactly the configured floor:
-    #: 0.60 + 0.50 * 0.30 = 0.75.
-    AT_FLOOR = 0.75
+    #: The raw cosine that calibrates to exactly the derived floor:
+    #: 0.60 + 0.65 * 0.30 = 0.795.
+    AT_FLOOR = 0.795
 
     def test_exactly_at_the_floor_matches(self) -> None:
         """Inclusive, matching the RetrievalResult contract."""
         scored = rank([candidate(node="a", vector=self.AT_FLOOR)])
         assert scored[0].relevance == pytest.approx(FLOOR)
-        assert to_retrieval_result("q-1", scored).status is RetrievalStatus.MATCHED
+        assert (
+            to_retrieval_result("q-1", scored, calibration=CALIBRATION).status
+            is RetrievalStatus.MATCHED
+        )
 
     def test_just_below_the_floor_does_not(self) -> None:
-        """Raw 0.747 -> calibrated 0.49, just under."""
-        scored = rank([candidate(node="a", vector=0.747)])
-        assert scored[0].relevance == pytest.approx(0.49)
-        assert to_retrieval_result("q-1", scored).status is RetrievalStatus.NO_MATCH
+        """Raw 0.7935 -> calibrated 0.645, just under 0.65."""
+        scored = rank([candidate(node="a", vector=0.7935)])
+        assert scored[0].relevance == pytest.approx(0.645, abs=1e-9)
+        result = to_retrieval_result("q-1", scored, calibration=CALIBRATION)
+        assert result.status is RetrievalStatus.NO_MATCH
 
     def test_preference_cannot_rescue_a_below_floor_candidate(self) -> None:
         """D17's invariant, at the floor rather than in the abstract.
 
-        A won, fresh, evidenced answer carries the maximum preference. It still
-        fails to qualify, because preference reorders and never gates.
+        Raw 0.7935 calibrates to 0.645, just under the 0.65 floor. A won, fresh,
+        evidenced answer carries preference 1.265, so final_score reaches
+        0.645 * 1.265 = 0.8159 — comfortably ABOVE the floor. It still does not
+        qualify, because the verdict reads relevance and nothing else.
         """
         scored = rank(
-            [candidate(node="a", vector=0.747, outcome=Outcome.WON, age_days=0, evidence=True)]
+            [candidate(node="a", vector=0.7935, outcome=Outcome.WON, age_days=0, evidence=True)]
         )
-        assert scored[0].preference > 1.0
+        assert scored[0].relevance == pytest.approx(0.645, abs=1e-9)
+        assert scored[0].preference == pytest.approx(1.265)
+        assert scored[0].final_score == pytest.approx(0.815925, abs=1e-6)
         assert scored[0].final_score > FLOOR
-        assert to_retrieval_result("q-1", scored).status is RetrievalStatus.NO_MATCH
+        assert (
+            to_retrieval_result("q-1", scored, calibration=CALIBRATION).status
+            is RetrievalStatus.NO_MATCH
+        )
 
     def test_preference_cannot_doom_an_above_floor_candidate(self) -> None:
         scored = rank(
             [candidate(node="a", vector=self.AT_FLOOR, outcome=Outcome.LOST, age_days=100_000)]
         )
         assert scored[0].preference < 1.0
-        assert to_retrieval_result("q-1", scored).status is RetrievalStatus.MATCHED
+        assert (
+            to_retrieval_result("q-1", scored, calibration=CALIBRATION).status
+            is RetrievalStatus.MATCHED
+        )
 
     def test_no_candidates_is_no_match(self) -> None:
-        result = to_retrieval_result("q-1", [])
+        result = to_retrieval_result("q-1", [], calibration=CALIBRATION)
         assert result.status is RetrievalStatus.NO_MATCH
         assert result.candidates == []
 
     def test_weak_candidates_are_still_returned_for_the_report(self) -> None:
         """NO_MATCH still shows what was considered, so it can be explained."""
         scored = rank([candidate(node="a", vector=0.65), candidate(node="b", vector=0.62)])
-        result = to_retrieval_result("q-1", scored)
+        result = to_retrieval_result("q-1", scored, calibration=CALIBRATION)
         assert result.status is RetrievalStatus.NO_MATCH
         assert len(result.candidates) == 2
 
-    def test_the_floor_recorded_on_the_result_is_the_calibrated_one(self) -> None:
-        """`floor_used` travels with the result so a verdict can be re-checked."""
-        result = to_retrieval_result("q-1", rank([candidate(node="a", vector=0.80)]))
-        assert result.floor_used == pytest.approx(CONFIG.retrieval.match_floor_calibrated)
+    def test_the_floor_recorded_on_the_result_comes_from_the_artifact(self) -> None:
+        """`floor_used` travels with the result so a verdict can be re-checked.
+
+        It is the ARTIFACT's floor. Amendment O leaves config with no floor
+        value to disagree with it.
+        """
+        result = to_retrieval_result(
+            "q-1", rank([candidate(node="a", vector=0.85)]), calibration=CALIBRATION
+        )
+        assert result.floor_used == pytest.approx(CALIBRATION.derived_floor)
+
+    def test_an_override_is_available_for_the_eval_sweep(self) -> None:
+        """The harness plots floor sensitivity; production never passes this."""
+        result = to_retrieval_result(
+            "q-1",
+            rank([candidate(node="a", vector=0.85)]),
+            calibration=CALIBRATION,
+            floor_override=0.10,
+        )
+        assert result.floor_used == pytest.approx(0.10)
+        assert result.status is RetrievalStatus.MATCHED
 
 
 class TestRerankApplication:

@@ -30,10 +30,12 @@ import asyncio
 import os
 import sys
 from datetime import UTC, datetime
+from pathlib import Path
 
 import httpx
 
 from src.contracts.embedding import EmbedRole, embedding_config
+from src.contracts.thresholds import config_dir
 from src.gateway.client import GatewayClient
 from src.gateway.fake_embedder import fake_embeddings, fake_embeddings_enabled
 from src.retrieval.calibration import (
@@ -47,6 +49,8 @@ from src.retrieval.calibration import (
 )
 
 BATCH = 16
+
+CONFIG_PATH = config_dir() / "scoring.yaml"
 
 
 async def _embed(texts: list[str], role: EmbedRole) -> list[list[float]]:
@@ -118,7 +122,7 @@ async def persist(artifact: CalibrationArtifact) -> str:
 
 def report(artifact: CalibrationArtifact) -> str:
     """The statistics, in the geometry they were measured in."""
-    floor = artifact.derived_floor()
+    floor = artifact.derived_floor
     lines = [
         "",
         "calibration — query x document geometry",
@@ -148,6 +152,40 @@ def report(artifact: CalibrationArtifact) -> str:
     return "\n".join(lines)
 
 
+#: The generated block in scoring.yaml. Rewritten in place by `stamp_config`.
+_STAMP_START = "  #   last derived floor:"
+_STAMP_LINES = 4
+
+
+def stamp_config(artifact: CalibrationArtifact, path: Path | None = None) -> None:
+    """Record what the derivation rule last produced, for human readers.
+
+    Amendment O keeps the floor VALUE out of config and in the artifact, which
+    is right for the runtime and awkward for anyone reading the YAML to
+    understand what the rule above it does. So the value is written back as a
+    generated comment: visible, dated, and inert — retrieval never reads it.
+
+    Rewritten rather than appended, so re-running calibration does not
+    accumulate a history of stamps in a config file.
+    """
+    target = path or CONFIG_PATH
+    lines = target.read_text(encoding="utf-8").splitlines()
+    for index, line in enumerate(lines):
+        if line.startswith(_STAMP_START):
+            lines[index : index + _STAMP_LINES] = [
+                f"  #   last derived floor: {artifact.derived_floor:.4f}",
+                f"  #   geometry:           {artifact.geometry}",
+                f"  #   computed at:        {artifact.computed_at}",
+                f"  #   embed model:        {artifact.embed_model_tag}",
+            ]
+            target.write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")
+            return
+    raise CalibrationError(
+        f"no generated stamp block found in {target}. Expected a line starting "
+        f"'{_STAMP_START}' under calibration.floor_derivation."
+    )
+
+
 async def run(*, dry_run: bool, skip_persist: bool) -> int:
     if fake_embeddings_enabled():
         sys.stderr.write(
@@ -165,6 +203,8 @@ async def run(*, dry_run: bool, skip_persist: bool) -> int:
 
     save(artifact)
     sys.stdout.write(f"wrote {CALIBRATION_PATH}\n")
+    stamp_config(artifact)
+    sys.stdout.write(f"stamped the derived floor into {CONFIG_PATH.name} (as a comment)\n")
 
     if not skip_persist:
         record_id = await persist(artifact)

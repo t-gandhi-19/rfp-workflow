@@ -238,6 +238,7 @@ class TestCalibrationFreshness:
             bg_p99=0.75,
             same_topic_p05=0.85,
             same_topic_p50=0.90,
+            derived_floor=0.666667,
         )
         with patch.object(preflight, "load_for_current_corpus", return_value=artifact):
             result = preflight.check_calibration_is_fresh()

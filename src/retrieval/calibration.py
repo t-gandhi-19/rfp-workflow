@@ -74,6 +74,17 @@ class CalibrationArtifact(BaseModel):
     same_topic_p05: float
     same_topic_p50: float
 
+    #: THE MATCH FLOOR. Derived at calibrate time and stored, because it is a
+    #: measurement rather than a setting (amendment O).
+    #:
+    #: It used to live in scoring.yaml as a value someone was expected to
+    #: overwrite once the real statistics existed. That shipped as
+    #: `match_floor_calibrated: 0.50` — a number retrieval consumed at runtime,
+    #: known to be wrong, and wrong silently. A config key holding a derived
+    #: value is a placeholder waiting to be forgotten; the config now holds the
+    #: RULE and the artifact holds the result.
+    derived_floor: float = Field(ge=0.0, le=1.0)
+
     @property
     def separation(self) -> float:
         """How far genuine matches sit above unrelated ones."""
@@ -94,14 +105,22 @@ class CalibrationArtifact(BaseModel):
             )
         return min(1.0, max(0.0, (cosine - self.bg_p50) / span))
 
-    def derived_floor(self) -> float:
-        """The match floor, in calibrated space.
 
-        Midpoint between "as high as unrelated content ever scores" (bg_p99) and
-        "as low as a genuine match ever scores" (same_topic_p05) — the widest gap
-        available, placed in the middle of it.
-        """
-        return (self.calibrated(self.bg_p99) + self.calibrated(self.same_topic_p05)) / 2
+def derive_floor(artifact: CalibrationArtifact, *, config: ScoringConfig | None = None) -> float:
+    """Place the floor inside the gap between the two anchors.
+
+    Between "as high as unrelated content ever scores" and "as low as a genuine
+    match ever scores" — the widest defensible gap, with `midpoint_weight`
+    choosing where in it to sit.
+
+    A pure function of the anchors and the rule, so the derivation can be tested
+    without a model and re-checked against a stored artifact later.
+    """
+    resolved = config or scoring_config()
+    rule = resolved.calibration.floor_derivation
+    low = artifact.calibrated(getattr(artifact, rule.background_anchor))
+    high = artifact.calibrated(getattr(artifact, rule.same_topic_anchor))
+    return low + rule.midpoint_weight * (high - low)
 
 
 def corpus_hash(pairs: list[dict[str, Any]]) -> str:
@@ -184,6 +203,9 @@ def compute(
         index = min(len(values) - 1, max(0, round(fraction * (len(values) - 1))))
         return values[index]
 
+    # Built in two steps: the floor is derived FROM the anchors, so the anchors
+    # have to exist before it can be. `derived_floor=0.0` is a placeholder that
+    # lives for one statement and never leaves this function.
     artifact = CalibrationArtifact(
         geometry=GEOMETRY,
         embed_model_tag=embed_model_tag,
@@ -196,6 +218,10 @@ def compute(
         bg_p99=percentile(background, 0.99),
         same_topic_p05=percentile(same_topic, 0.05),
         same_topic_p50=statistics.median(same_topic),
+        derived_floor=0.0,
+    )
+    artifact = artifact.model_copy(
+        update={"derived_floor": derive_floor(artifact, config=resolved)}
     )
 
     if artifact.separation < resolved.calibration.min_separation_raw:

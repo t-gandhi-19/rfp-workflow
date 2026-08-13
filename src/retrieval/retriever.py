@@ -270,4 +270,4 @@ async def retrieve(
     scored = score_candidates(
         survivors, calibration=artifact, rerank_scores=rerank_scores, config=resolved
     )
-    return to_retrieval_result(question_id, scored, config=resolved), trace
+    return to_retrieval_result(question_id, scored, calibration=artifact), trace

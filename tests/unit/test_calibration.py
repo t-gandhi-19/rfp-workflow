@@ -22,7 +22,7 @@ from typing import Any
 
 import pytest
 
-from src.contracts.thresholds import scoring_config
+from src.contracts.thresholds import ScoringConfig, scoring_config
 from src.retrieval.calibration import (
     GEOMETRY,
     CalibrationArtifact,
@@ -31,6 +31,7 @@ from src.retrieval.calibration import (
     compute,
     corpus_hash,
     cosine,
+    derive_floor,
     load,
     save,
 )
@@ -54,8 +55,16 @@ def artifact(**overrides: Any) -> CalibrationArtifact:
         "bg_p99": 0.75,
         "same_topic_p05": 0.85,
         "same_topic_p50": 0.90,
+        "derived_floor": 0.666667,
     }
     return CalibrationArtifact(**{**defaults, **overrides})
+
+
+def weighted(midpoint_weight: float) -> ScoringConfig:
+    """CONFIG with a different midpoint weighting, to drive the rule's extremes."""
+    data = CONFIG.model_dump()
+    data["calibration"]["floor_derivation"]["midpoint_weight"] = midpoint_weight
+    return ScoringConfig.model_validate(data)
 
 
 def unit(seed: int, dimensions: int) -> list[float]:
@@ -152,15 +161,23 @@ class TestCalibratedMapping:
 
 
 class TestDerivedFloor:
+    """Amendment O: the floor is derived at calibrate time and STORED.
+
+    It used to live in scoring.yaml as a value someone was expected to overwrite
+    once real statistics existed — which shipped as a known-wrong 0.50 that
+    retrieval consumed at runtime. Config now holds the rule; the artifact holds
+    the result, next to the anchors that justify it.
+    """
+
     def test_it_is_the_midpoint_of_the_gap(self) -> None:
         """calibrated(0.75) = 0.5, calibrated(0.85) = 0.8333; midpoint 0.6667."""
-        assert artifact().derived_floor() == pytest.approx(0.666667, abs=1e-6)
+        assert derive_floor(artifact()) == pytest.approx(0.666667, abs=1e-6)
 
     def test_it_sits_between_the_two_anchors(self) -> None:
         subject = artifact()
         assert (
             subject.calibrated(subject.bg_p99)
-            < subject.derived_floor()
+            < derive_floor(subject)
             < subject.calibrated(subject.same_topic_p05)
         )
 
@@ -168,9 +185,30 @@ class TestDerivedFloor:
         subject = artifact(bg_p99=0.65, same_topic_p05=0.88)
         assert (
             subject.calibrated(subject.bg_p99)
-            <= subject.derived_floor()
+            <= derive_floor(subject)
             <= subject.calibrated(subject.same_topic_p05)
         )
+
+    def test_midpoint_weight_zero_sits_on_the_background_anchor(self) -> None:
+        """The permissive extreme: admit everything above background noise."""
+        subject = artifact()
+        config = weighted(0.0)
+        assert derive_floor(subject, config=config) == pytest.approx(
+            subject.calibrated(subject.bg_p99)
+        )
+
+    def test_midpoint_weight_one_sits_on_the_same_topic_anchor(self) -> None:
+        """The strict extreme: reject anything weaker than the weakest match."""
+        subject = artifact()
+        assert derive_floor(subject, config=weighted(1.0)) == pytest.approx(
+            subject.calibrated(subject.same_topic_p05)
+        )
+
+    def test_compute_stores_the_derived_floor_on_the_artifact(self) -> None:
+        """Runtime reads it from here, so it has to actually be written."""
+        measured = measure()
+        assert measured.derived_floor == pytest.approx(derive_floor(measured), abs=1e-9)
+        assert 0.0 <= measured.derived_floor <= 1.0
 
     def test_separation_is_the_raw_gap(self) -> None:
         assert artifact().separation == pytest.approx(0.85 - 0.75)
@@ -304,7 +342,7 @@ class TestFailClosedLoading:
             expected_model_tag=MODEL_TAG,
             expected_corpus_hash=subject.corpus_hash,
         )
-        assert loaded.derived_floor() == pytest.approx(subject.derived_floor())
+        assert loaded.derived_floor == pytest.approx(subject.derived_floor)
 
     def test_an_unknown_field_is_refused(self, tmp_path: Path) -> None:
         """`extra="forbid"`: a hand-edited artifact fails rather than half-loads."""

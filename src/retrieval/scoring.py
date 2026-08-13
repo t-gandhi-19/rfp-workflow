@@ -243,8 +243,8 @@ def to_retrieval_result(
     question_id: str,
     scored: list[ScoredCandidate],
     *,
+    calibration: CalibrationArtifact,
     floor_override: float | None = None,
-    config: ScoringConfig | None = None,
 ) -> RetrievalResult:
     """Wrap ranked candidates with the MATCHED / NO_MATCH verdict.
 
@@ -252,18 +252,19 @@ def to_retrieval_result(
     drafter to escalate rather than stretch a weak candidate into an answer, and
     the eval scores it at zero tolerance in both directions.
 
-    The floor is `match_floor_calibrated` and is compared against `relevance`,
-    which is in calibrated space. Amendment L renamed it from `match_floor` for
-    exactly that reason: the old name said nothing about units, and the value it
-    held (0.55) had been chosen for calibrated space while being compared
-    against raw cosine, where every real score exceeded it.
+    **The floor comes from the artifact, never from config (amendment O).** It is
+    a measurement derived from corpus statistics, and a config key holding a
+    derived value is a placeholder waiting to be forgotten — which is exactly
+    what `match_floor_calibrated: 0.50` was. Config holds the derivation rule;
+    the artifact holds what that rule produced, alongside the anchors that
+    justify it.
+
+    `floor_override` exists for the eval harness, which sweeps the floor to plot
+    sensitivity. It is not a production path.
     """
-    resolved = config or scoring_config()
     # D17: the floor is judged on relevance. Preference reorders what qualifies;
     # it never decides what qualifies.
-    floor = (
-        floor_override if floor_override is not None else resolved.retrieval.match_floor_calibrated
-    )
+    floor = floor_override if floor_override is not None else calibration.derived_floor
     cleared = [candidate for candidate in scored if candidate.relevance >= floor]
     return RetrievalResult(
         question_id=question_id,

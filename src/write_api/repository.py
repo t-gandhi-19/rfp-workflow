@@ -149,7 +149,7 @@ async def upsert_calibration(
             "bg_p99": artifact.bg_p99,
             "same_topic_p05": artifact.same_topic_p05,
             "same_topic_p50": artifact.same_topic_p50,
-            "derived_floor": artifact.derived_floor(),
+            "derived_floor": artifact.derived_floor,
             "written_by": written_by,
         },
         key=["embed_model_tag", "corpus_hash", "geometry"],
