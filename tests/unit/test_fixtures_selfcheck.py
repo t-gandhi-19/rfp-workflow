@@ -22,6 +22,8 @@ from typing import Any
 
 import pytest
 
+from src.contracts.thresholds import scoring_config
+from src.gateway.fake_embedder import tokenize
 from src.graph.driver import normalise_name
 
 FIXTURES = Path(__file__).resolve().parents[2] / "fixtures"
@@ -266,15 +268,47 @@ class TestParaphrases:
     of exact duplicates, which puts the derived floor above genuine matches.
     """
 
-    def test_two_per_family(
+    def test_three_per_family(
         self, paraphrases: list[dict[str, Any]], pairs: list[dict[str, Any]]
     ) -> None:
         families = {p["topic_family"] for p in pairs}
         counts = Counter(p["topic_family"] for p in paraphrases)
         assert set(counts) == families
-        assert set(counts.values()) == {2}, (
+        assert set(counts.values()) == {3}, (
             "an uneven count would weight some subjects more heavily in the statistics"
         )
+
+    def test_one_hundred_and_eight_in_total(self, paraphrases: list[dict[str, Any]]) -> None:
+        assert len(paraphrases) == 36 * 3
+
+    def test_the_same_subject_population_clears_its_guard(
+        self, paraphrases: list[dict[str, Any]], pairs: list[dict[str, Any]]
+    ) -> None:
+        """The pair count the erosion ratchet commissions from (D18 addendum).
+
+        Under the D18 population rule — query: any family member, document:
+        indexed originals only — the structural maximum is:
+
+            32 singleton families  4 queries x 1 document - 1 self = 3  ->  96
+             4 version families    5 queries x 2 documents - 2 self = 8 ->  32
+                                                              total  =  128
+
+        Two paraphrases per family gave 88, below the configured minimum of 100.
+        The corpus gained a third rather than the constant being lowered: the
+        ratchet's whole future baseline rests on this population's p05, and a
+        p05 over 88 values rests on about four observations.
+        """
+        members: Counter[str] = Counter()
+        documents: Counter[str] = Counter()
+        for pair in pairs:
+            members[pair["topic_family"]] += 1
+            documents[pair["topic_family"]] += 1
+        for para in paraphrases:
+            members[para["topic_family"]] += 1
+
+        same = sum(members[family] * documents[family] - documents[family] for family in documents)
+        assert same == 128
+        assert same >= scoring_config().calibration.min_same_topic_pairs
 
     def test_ids_are_unique(self, paraphrases: list[dict[str, Any]]) -> None:
         for field in ("id", "question_id", "topic_key", "question"):
@@ -287,6 +321,29 @@ class TestParaphrases:
         """A paraphrase that copies the original measures nothing."""
         originals = {p["question"] for p in pairs}
         assert not originals.intersection(p["question"] for p in paraphrases)
+
+    def test_none_is_a_mere_reordering(
+        self, paraphrases: list[dict[str, Any]], pairs: list[dict[str, Any]]
+    ) -> None:
+        """The realism criterion's upper bound, enforced.
+
+        A paraphrase whose content-word SET equals its original's has only
+        rearranged the sentence. That measures tokenisation rather than
+        semantics, and it reintroduces the duplicate-anchor problem in
+        miniature — the same-subject anchor is supposed to record what a genuine
+        REWORDING scores, not what a shuffle scores.
+
+        The lower bound is the opposite failure and is covered by the generator:
+        the first paraphrase round shared no content words at all with its
+        originals, an adversarial floor that dragged the anchor down.
+        """
+        by_qid = {p["question_id"]: p for p in pairs}
+        offenders = []
+        for para in paraphrases:
+            original = by_qid[para["paraphrase_of"]]
+            if set(tokenize(original["question"])) == set(tokenize(para["question"])):
+                offenders.append(para["id"])
+        assert offenders == [], f"reorderings, not paraphrases: {offenders}"
 
     def test_each_carries_no_answer_of_its_own(
         self, paraphrases: list[dict[str, Any]], pairs: list[dict[str, Any]]
@@ -321,8 +378,9 @@ class TestParaphrases:
         """
         confidential = next(p for p in pairs if p["confidential"])
         rephrased = [p for p in paraphrases if p["answer_id"] == confidential["answer_id"]]
-        assert len(rephrased) == 2
+        assert len(rephrased) == 3
         assert all(p["customer"] == confidential["customer"] for p in rephrased)
+        assert all(p["customer"] == "Bluepine Health Systems" for p in rephrased)
 
     def test_no_pricing_figure_appears(self, paraphrases: list[dict[str, Any]]) -> None:
         for row in paraphrases:

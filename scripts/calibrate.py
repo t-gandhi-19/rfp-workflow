@@ -201,6 +201,24 @@ def commission(artifact: CalibrationArtifact, path: Path | None = None) -> tuple
     body_min = round(artifact.body_separation * BODY_MIN_FRACTION, 4)
     tail = round(artifact.separation, 4)
 
+    # VALIDATE BEFORE WRITING. A measurement that cannot be a baseline must not
+    # become one: an earlier version wrote first and validated on reload, which
+    # left a negative `commissioned_tail` in the config after a failed run and
+    # made every subsequent command fail at config load — including the ones
+    # needed to diagnose it.
+    if tail <= 0:
+        raise CalibrationError(
+            f"refusing to commission a non-positive tail separation ({tail:+.4f}). The "
+            f"weakest genuine match (p05 {artifact.same_topic_p05:.4f}) does not clear the "
+            f"strongest unrelated pair (p99 {artifact.bg_p99:.4f}), so there is no margin to "
+            f"defend. This is a corpus or embedding-model question, not a threshold to set."
+        )
+    if body_min <= 0:
+        raise CalibrationError(
+            f"refusing to commission a non-positive body floor ({body_min:+.4f}); the "
+            f"distributions do not separate in bulk."
+        )
+
     lines = target.read_text(encoding="utf-8").splitlines()
     seen_tail = seen_body = False
     for index, line in enumerate(lines):

@@ -120,9 +120,26 @@ calibration:
   # The same-subject anchor is the one most at risk of being computed from
   # almost nothing: it is the smaller population by two orders of magnitude, and
   # a p05 taken over a handful of values is that handful's minimum wearing a
-  # percentile's name. 40 topic families x 2 paraphrases yields 240 ordered
-  # same-subject pairs, so this leaves room for the corpus to shrink somewhat
-  # without letting it shrink to noise.
+  # percentile's name. The erosion ratchet commissions FROM that p05, so this
+  # guard protects the baseline every future regression check is measured
+  # against.
+  #
+  # DERIVATION, against the D18 population rule (query: any family member;
+  # document: indexed originals only):
+  #
+  #   32 singleton families   4 queries x 1 document - 1 self  =  3  ->  96
+  #    4 version families     5 queries x 2 documents - 2 self =  8  ->  32
+  #                                             structural max      = 128
+  #
+  #   100 / 128 = 78%, which tolerates losing roughly one family's entire
+  #   paraphrase set before firing.
+  #
+  # This value SURVIVED the population correction by arithmetic rather than by
+  # derivation — its previous rationale cited 240 pairs under the superseded
+  # all-pairs population, where the same corpus would have yielded 88 under the
+  # corrected rule and failed. The corpus gained a third paraphrase per family
+  # rather than the constant being lowered to fit: fix the data the statistic
+  # stands on, not the threshold.
   min_same_topic_pairs: 100
   # The same-topic p05 must clear the background p99 by at least this much, or
   # ingest fails loudly rather than retrieval failing quietly.

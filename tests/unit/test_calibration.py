@@ -517,7 +517,7 @@ class TestCalibrationCorpus:
 
     def test_it_covers_the_corpus_and_the_paraphrases(self) -> None:
         rows = calibration_corpus()
-        assert len(rows) == 112, "40 corpus questions + 72 paraphrases"
+        assert len(rows) == 148, "40 corpus questions + 108 paraphrases"
 
     def test_every_row_carries_a_family(self) -> None:
         assert all(row["topic_family"] for row in calibration_corpus())
@@ -529,15 +529,24 @@ class TestCalibrationCorpus:
     def test_it_clears_both_minimum_pair_guards(self) -> None:
         """The shipped corpus must be able to calibrate itself.
 
-        Computed from the family structure rather than by embedding, so this
-        stays a fast unit test and still fails the moment the corpus shrinks
-        past what the guards permit.
+        Counted under the D18 POPULATION RULE, not over all pairs: queries are
+        every family member, documents are indexed originals only. Computed from
+        the family structure rather than by embedding, so this stays a fast unit
+        test and still fails the moment the corpus shrinks past what the guards
+        permit.
         """
         rows = calibration_corpus()
-        sizes: dict[str, int] = {}
+        indexed = indexed_ids(rows)
+        members: dict[str, int] = {}
+        documents: dict[str, int] = {}
         for row in rows:
-            sizes[row["topic_family"]] = sizes.get(row["topic_family"], 0) + 1
-        same = sum(size * (size - 1) for size in sizes.values())
-        total = len(rows) * (len(rows) - 1)
+            family = row["topic_family"]
+            members[family] = members.get(family, 0) + 1
+            if row["question_id"] in indexed:
+                documents[family] = documents.get(family, 0) + 1
+
+        same = sum(members[f] * documents[f] - documents[f] for f in documents)
+        total = len(rows) * len(indexed) - len(indexed)
+        assert same == 128, "96 from 32 singleton families + 32 from 4 version families"
         assert same >= CONFIG.calibration.min_same_topic_pairs
         assert total - same >= CONFIG.calibration.min_background_pairs
