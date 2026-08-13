@@ -169,12 +169,19 @@ PREFLIGHT_ENV = OLLAMA_BASE_URL_HOST=$${OLLAMA_BASE_URL_HOST:-http://localhost:1
 
 .PHONY: preflight
 preflight: check-env ## Verify the embedding path and that calibration is current
-	@set -a && source .env && set +a && $(PREFLIGHT_ENV) $(RUN) python -m scripts.preflight
+	@# HOST_NEO4J for the same reason apply-schema and ingest carry it: .env sets
+	@# NEO4J_URI to the COMPOSE SERVICE NAME, which only resolves inside the
+	@# network. Amendment Q's auth probe runs from the host, so without this it
+	@# dials a name that does not exist — on any machine, including a clean clone.
+	@set -a && source .env && set +a && \
+		$(HOST_NEO4J) $(PREFLIGHT_ENV) $(RUN) python -m scripts.preflight
 
 .PHONY: preflight-pre-ingest
 preflight-pre-ingest: check-env ## Preflight without the calibration check (nothing to calibrate yet)
+	@# `ingest` depends on this target, so a missing HOST_NEO4J here stopped
+	@# `make ingest` at the gate before it reached any of its own work.
 	@set -a && source .env && set +a && \
-		$(PREFLIGHT_ENV) $(RUN) python -m scripts.preflight --skip-calibration
+		$(HOST_NEO4J) $(PREFLIGHT_ENV) $(RUN) python -m scripts.preflight --skip-calibration
 
 .PHONY: apply-schema
 apply-schema: check-env ## Apply the Neo4j schema (idempotent)
