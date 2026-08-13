@@ -29,15 +29,60 @@ from src.graph.driver import normalise_name
 
 
 class SimilarQuestion(BaseModel):
-    """One vector-index hit, before any graph multiplier is applied."""
+    """One vector-index hit, before any graph multiplier is applied.
+
+    `score` is a TRUE COSINE, converted from the index's own scale by
+    :func:`index_score_to_cosine`. See that function for why the distinction is
+    load-bearing rather than pedantic.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
     question_id: str
     text: str
     normalized_text: str
-    score: float = Field(ge=0.0, le=1.0)
+    #: Cosine similarity in [-1, 1]. Not the raw index score.
+    score: float = Field(ge=-1.0, le=1.0)
     answer_ids: list[str] = Field(default_factory=list)
+
+
+def index_score_to_cosine(score: float) -> float:
+    """Convert Neo4j's cosine index score into an actual cosine.
+
+    **Neo4j does not return the cosine.** For a `cosine` vector index it returns
+    a similarity normalised into [0, 1]:
+
+        score = (1 + cos) / 2        so        cos = 2 * score - 1
+
+    Everything downstream — the calibration mapping, the derived floor, the
+    relevance blend — is defined on the COSINE. Calibration measures its anchors
+    with a plain dot product over unit vectors (`src.retrieval.calibration.
+    cosine`), never through the index, so the two numbers live in different
+    spaces and only one of them is what the floor was derived over.
+
+    WHAT THIS COST, recorded because the shape recurs. Feeding the index score
+    straight into `calibrated()` inflates every candidate: the background median
+    0.4930 arrives as 0.7465 and the same-subject median 0.7718 arrives as
+    0.8859, so scores that should sit near the middle of the band saturate at
+    the top of it. Measured on the golden set, that made **all twenty** questions
+    MATCHED — including the three the corpus deliberately cannot answer — with
+    Recall@5 at 0.2667, because the floor no longer rejected anything and the
+    ordering was decided by preference among uniformly-saturated relevances.
+
+    It is the third instance of one fault: two numbers in different units
+    compared as though they were the same. Amendment L was a calibrated-space
+    floor compared against raw cosine; the task-prefix bug was two differently
+    conditioned embedding spaces; this is an index score compared against a
+    cosine-derived floor.
+
+    WHY THE D19 PROBE GATE DID NOT CATCH IT. The tier-2 canary lands the golden
+    questions on the derived floor using calibration's own dot product. It never
+    reads the vector index, so calibration was entirely self-consistent while
+    disagreeing with the graph. A guard that shares its inputs with the thing it
+    guards can only prove internal consistency — which is why the retrieval eval
+    runs against the real index and is the check that found this.
+    """
+    return 2.0 * score - 1.0
 
 
 class AnswerRecord(BaseModel):
@@ -166,6 +211,19 @@ async def find_similar_questions(
     expected = embedding_config().model.dimensions
     if len(embedding) != expected:
         raise ValueError(f"embedding has {len(embedding)} dimensions, index expects {expected}")
+
+    # `index_score_to_cosine` inverts the normalisation Neo4j applies to a
+    # COSINE index specifically. A euclidean index normalises differently, so
+    # the same conversion would silently produce a number that is not a cosine
+    # and the floor would judge it anyway — the exact failure this whole path
+    # exists to have caught once.
+    similarity = embedding_config().index.similarity
+    if similarity != "cosine":
+        raise ValueError(
+            f"the vector index is configured for '{similarity}' similarity, but retrieval "
+            f"converts scores assuming 'cosine'. Calibration measures cosine anchors, so a "
+            f"different index similarity needs both a new conversion and a recalibration."
+        )
     result = await session.run(
         _FIND_SIMILAR,
         index_name=embedding_config().index.name,
@@ -176,7 +234,13 @@ async def find_similar_questions(
         requesting_customer=requesting_customer,
     )
     records = [record.data() async for record in result]
-    return [SimilarQuestion.model_validate(record) for record in records]
+    # Converted HERE, at the one boundary that knows the number came out of a
+    # Neo4j cosine index. Every consumer downstream is entitled to assume a
+    # cosine, because that is what calibration measured its anchors in.
+    return [
+        SimilarQuestion.model_validate({**record, "score": index_score_to_cosine(record["score"])})
+        for record in records
+    ]
 
 
 _ANSWER_LINEAGE = """

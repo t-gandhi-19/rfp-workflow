@@ -176,6 +176,82 @@ class TestVectorSearch:
         assert record["embedded"] == 40
         assert record["paraphrases"] == 0
 
+    async def test_the_returned_score_is_a_cosine_not_the_index_score(
+        self, session: AsyncSession
+    ) -> None:
+        """The conversion, settled by the only authority on it.
+
+        A unit test can prove `2 * score - 1` inverts `(1 + cos) / 2`. It cannot
+        prove Neo4j normalises that way — and that assumption is what the floor
+        rests on, so it is pinned against the live index.
+
+        Compares the score `find_similar_questions` returns with the cosine
+        computed directly from the two stored vectors. The tolerance is 1e-3
+        because Neo4j stores vectors as float32 while the dot product here is
+        float64; that rounding is also the reason retrieval's cosine differs
+        slightly from calibration's, which is expected and far below the width
+        of the band.
+        """
+        result = await session.run(
+            "MATCH (q:Question) WHERE q.embedding IS NOT NULL "
+            "RETURN q.id AS id, q.embedding AS e ORDER BY q.id LIMIT 1"
+        )
+        record = await result.single()
+        assert record is not None
+        probe = list(record["e"])
+
+        hits = await queries.find_similar_questions(
+            session,
+            embedding=probe,
+            domain="cloud_migration",
+            requesting_customer=MERIDIAN,
+            k=5,
+        )
+        assert hits
+
+        vectors = await session.run(
+            "MATCH (q:Question) WHERE q.id IN $ids RETURN q.id AS id, q.embedding AS e",
+            ids=[hit.question_id for hit in hits],
+        )
+        stored = {row["id"]: list(row["e"]) async for row in vectors}
+
+        for hit in hits:
+            expected = sum(a * b for a, b in zip(probe, stored[hit.question_id], strict=True))
+            assert hit.score == pytest.approx(expected, abs=1e-3), (
+                f"{hit.question_id}: returned {hit.score:.6f}, true cosine {expected:.6f}. "
+                "If these differ by roughly (1+cos)/2, the index normalisation changed."
+            )
+
+    async def test_the_scores_span_the_band_calibration_measured(
+        self, session: AsyncSession
+    ) -> None:
+        """A sanity check that the converted numbers are in the right place.
+
+        Unconverted index scores on this corpus sat around 0.81-0.84 — above the
+        same-subject median of 0.7718, which is what made every candidate
+        saturate. Converted, an unrelated pair should land near the background
+        median, well under that.
+        """
+        result = await session.run(
+            "MATCH (q:Question) WHERE q.embedding IS NOT NULL "
+            "RETURN q.embedding AS e ORDER BY q.id LIMIT 1"
+        )
+        record = await result.single()
+        assert record is not None
+
+        hits = await queries.find_similar_questions(
+            session,
+            embedding=list(record["e"]),
+            domain="cloud_migration",
+            requesting_customer=MERIDIAN,
+            k=20,
+        )
+        # The probe matches itself at ~1.0; everything after it is a different
+        # subject and must sit in the background band, not above it.
+        others = [hit.score for hit in hits[1:]]
+        assert others, "expected more than one hit"
+        assert max(others) < 0.75, f"non-self hits reach {max(others):.4f}; band looks wrong"
+
     async def test_an_unknown_domain_returns_nothing(self, session: AsyncSession) -> None:
         hits = await queries.find_similar_questions(
             session,
