@@ -114,6 +114,24 @@ test-report: ## Per-suite verbatim pytest summaries + the SHA they were produced
 	@echo "commit:    $$(git rev-parse HEAD)"
 	@echo "short SHA: $$(git rev-parse --short HEAD)"
 	@echo "worktree:  $$(git status --porcelain | wc -l | tr -d ' ') uncommitted path(s)"
+	@# Amendment M. The review gate is the REMOTE, so the report states what is
+	@# actually on it. A commit that exists only locally is not reviewable, and
+	@# "landed" was once written about exactly that — this line makes the claim
+	@# generated rather than remembered, like the pytest summaries below it.
+	@#
+	@# The remote ref is re-fetched first: a stale origin/<branch> would report a
+	@# push that has not happened, which is the failure this exists to catch.
+	@BRANCH=$$(git rev-parse --abbrev-ref HEAD); \
+	git fetch --quiet origin "$$BRANCH" 2>/dev/null || true; \
+	LOCAL=$$(git rev-parse HEAD); \
+	REMOTE=$$(git rev-parse --verify --quiet "origin/$$BRANCH" || echo ""); \
+	if [ -z "$$REMOTE" ]; then \
+		echo "pushed:    UNPUSHED — local $$(git rev-parse --short HEAD), no origin/$$BRANCH"; \
+	elif [ "$$LOCAL" = "$$REMOTE" ]; then \
+		echo "pushed:    $$BRANCH @ $$LOCAL (origin verified)"; \
+	else \
+		echo "pushed:    UNPUSHED — local $$(git rev-parse --short $$LOCAL) ahead of origin $$(git rev-parse --short $$REMOTE)"; \
+	fi
 	@set -a; [ -f .env ] && . ./.env; set +a; \
 	export KEYCLOAK_BASE=$${KEYCLOAK_BASE:-http://localhost:$${KEYCLOAK_PORT_HOST:-8080}}; \
 	export WRITE_API_BASE=$${WRITE_API_BASE:-http://localhost:$${WRITE_API_PORT:-8001}}; \
