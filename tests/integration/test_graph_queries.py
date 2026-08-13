@@ -114,6 +114,68 @@ class TestVectorSearch:
         )
         assert [h.question_id for h in first] == [h.question_id for h in second]
 
+    async def test_no_paraphrase_is_ever_a_candidate_for_any_golden_question(
+        self, session: AsyncSession
+    ) -> None:
+        """AMENDMENT P, ZERO TOLERANCE. Not 'few'. None, for all twenty.
+
+        A paraphrase carries no answer of its own — it points at the one its
+        original already has — so a paraphrase in a candidate list is a
+        duplicate of a result already there, competing for a rank it cannot
+        deserve. It is also the population the calibration artifact says is not
+        on the document side, so one appearing would mean the floor was derived
+        over a distribution retrieval does not actually sample.
+        """
+        with (FIXTURES / "answer_key_manual.json").open(encoding="utf-8") as handle:
+            golden = json.load(handle)["questions"]
+        with (FIXTURES / "question_paraphrases.json").open(encoding="utf-8") as handle:
+            paraphrase_ids = {row["question_id"] for row in json.load(handle)}
+
+        offenders: list[tuple[str, str]] = []
+        for question in golden:
+            hits = await queries.find_similar_questions(
+                session,
+                embedding=fake_embedding(question["text"], 768, role=EmbedRole.QUERY),
+                domain="cloud_migration",
+                requesting_customer=MERIDIAN,
+                # Deliberately far more than retrieval ever asks for: a
+                # paraphrase absent from the top 5 but present at rank 19 is
+                # still in the candidate space this forbids.
+                k=40,
+            )
+            offenders.extend(
+                (question["number"], hit.question_id)
+                for hit in hits
+                if hit.question_id in paraphrase_ids
+            )
+        assert offenders == [], f"paraphrases surfaced as candidates: {offenders}"
+
+    async def test_paraphrases_hold_no_embedding_at_all(self, session: AsyncSession) -> None:
+        """The primary mechanism, checked directly rather than through a query.
+
+        The filter in `find_similar_questions` is belt and braces; this is the
+        braces. A paraphrase with a vector is in the index whatever any query
+        says, and the calibration artifact's population would be wrong.
+        """
+        result = await session.run(
+            "MATCH (q:Question:Paraphrase) RETURN count(q) AS total, count(q.embedding) AS embedded"
+        )
+        record = await result.single()
+        assert record is not None
+        assert record["total"] == 108
+        assert record["embedded"] == 0
+
+    async def test_exactly_the_originals_are_indexed(self, session: AsyncSession) -> None:
+        """The D18 document side, as a count: 40 indexed originals, no more."""
+        result = await session.run(
+            "MATCH (q:Question) WHERE q.embedding IS NOT NULL "
+            "RETURN count(q) AS embedded, count(CASE WHEN q:Paraphrase THEN 1 END) AS paraphrases"
+        )
+        record = await result.single()
+        assert record is not None
+        assert record["embedded"] == 40
+        assert record["paraphrases"] == 0
+
     async def test_an_unknown_domain_returns_nothing(self, session: AsyncSession) -> None:
         hits = await queries.find_similar_questions(
             session,
@@ -313,6 +375,95 @@ class TestConfidentialityAtTheQueryBoundary:
         )
         assert secret["answer_id"] in {a.answer_id for a in for_bluepine}
 
+    async def test_every_paraphrase_inherits_its_original_s_confidentiality_owner(
+        self, session: AsyncSession
+    ) -> None:
+        """AMENDMENT P's other half, proved through the graph, not the fixtures.
+
+        Excluding paraphrases from retrieval does NOT make their ownership
+        irrelevant. `find_similar_questions` decides confidentiality by walking
+        (question)-[:ASKED_IN]->(:RFP)-[:ISSUED_BY]->(owner), and `answers_for_
+        question` walks the same path — so a paraphrase hung off a different
+        customer's RFP would make its original's answer reachable through a
+        synonym, whether or not the paraphrase itself can be a candidate.
+
+        Asserted as an EQUALITY over all 108, resolved by the graph. The fixture
+        self-check proves the JSON agrees with itself; this proves ingest built
+        the edges that agreement depends on.
+        """
+        result = await session.run(
+            """
+            MATCH (p:Question:Paraphrase)-[:PARAPHRASE_OF]->(original:Question)
+            MATCH (p)-[:ASKED_IN]->(:RFP)-[:ISSUED_BY]->(pOwner:Customer)
+            MATCH (original)-[:ASKED_IN]->(:RFP)-[:ISSUED_BY]->(oOwner:Customer)
+            RETURN p.id AS paraphrase_id, pOwner.name AS paraphrase_owner,
+                   oOwner.name AS original_owner
+            ORDER BY paraphrase_id
+            """
+        )
+        rows = [record.data() async for record in result]
+        assert len(rows) == 108, "every paraphrase must resolve an owner on both sides"
+        mismatched = [r for r in rows if r["paraphrase_owner"] != r["original_owner"]]
+        assert mismatched == [], f"paraphrases owned by another customer: {mismatched}"
+
+    async def test_the_bluepine_paraphrases_are_the_named_case(
+        self, session: AsyncSession, pairs: list[dict[str, Any]]
+    ) -> None:
+        """The one family where inheritance failing would be an actual leak.
+
+        Bluepine owns the corpus's only confidential answer, and its family now
+        carries three paraphrases. If any of them were asked in another
+        customer's RFP, ANS-0014 would become reachable to that customer through
+        a reworded question.
+        """
+        secret = next(p for p in pairs if p["confidential"])
+        assert secret["customer"] == BLUEPINE
+
+        result = await session.run(
+            """
+            MATCH (p:Question:Paraphrase)-[:PARAPHRASE_OF]->(:Question {id: $qid})
+            MATCH (p)-[:ASKED_IN]->(:RFP)-[:ISSUED_BY]->(owner:Customer)
+            MATCH (p)-[:ANSWERED_BY]->(a:Answer)
+            RETURN p.id AS id, owner.name AS owner, collect(a.id) AS answer_ids
+            ORDER BY id
+            """,
+            qid=secret["question_id"],
+        )
+        rows = [record.data() async for record in result]
+        assert len(rows) == 3, "the Bluepine family carries three paraphrases"
+        assert {r["owner"] for r in rows} == {BLUEPINE}
+        assert all(secret["answer_id"] in r["answer_ids"] for r in rows)
+
+    async def test_the_confidential_answer_stays_unreachable_through_a_paraphrase(
+        self, session: AsyncSession, pairs: list[dict[str, Any]]
+    ) -> None:
+        """The leak stated as an outcome, through the retrieval boundary itself.
+
+        Embedding a Bluepine paraphrase's own text is the strongest possible
+        query for reaching ANS-0014 by synonym. Meridian must get neither the
+        paraphrase (amendment P) nor the answer (confidentiality).
+        """
+        secret = next(p for p in pairs if p["confidential"])
+        with (FIXTURES / "question_paraphrases.json").open(encoding="utf-8") as handle:
+            rephrased = [
+                row for row in json.load(handle) if row["answer_id"] == secret["answer_id"]
+            ]
+        assert rephrased, "expected paraphrases of the confidential question"
+
+        for row in rephrased:
+            hits = await queries.find_similar_questions(
+                session,
+                embedding=fake_embedding(row["question"], 768, role=EmbedRole.QUERY),
+                domain="cloud_migration",
+                requesting_customer=MERIDIAN,
+                k=20,
+            )
+            assert row["question_id"] not in {hit.question_id for hit in hits}
+            reachable = {answer_id for hit in hits for answer_id in hit.answer_ids}
+            assert secret["answer_id"] not in reachable, (
+                f"{secret['answer_id']} reachable to {MERIDIAN} via paraphrase {row['id']}"
+            )
+
     async def test_a_confidential_question_is_not_even_a_candidate_for_another_customer(
         self, session: AsyncSession, pairs: list[dict[str, Any]]
     ) -> None:
@@ -397,21 +548,47 @@ class TestCoverageGaps:
 
 class TestIngestIsIdempotent:
     async def test_counts_are_stable(self, session: AsyncSession) -> None:
-        """Re-running ingest must not duplicate. Asserted against known totals."""
+        """Re-running ingest must not duplicate. Asserted against known totals.
+
+        The Question and ANSWERED_BY figures were STALE, and had been since the
+        paraphrases landed: they still read 40, which is the count of Q&A pairs,
+        while the graph had held 148 Question nodes and 148 ANSWERED_BY edges
+        ever since. The test was failing on the real graph and nothing said so,
+        because the integration suite needs a live stack and the verification
+        habit quotes tests/unit and tests/security.
+
+        Corrected rather than relaxed, and split so each number says which
+        population it describes.
+        """
         totals = await queries.counts(session)
-        assert totals["by_label"]["Question"] == 40
+        # 40 originals + 108 paraphrases, and every paraphrase carries both
+        # labels (amendment P) so the two counts deliberately overlap.
+        assert totals["by_label"]["Question"] == 148
+        assert totals["by_label"]["Paraphrase"] == 108
+        # A paraphrase carries no answer of its own, so this stays at 40.
         assert totals["by_label"]["Answer"] == 40
         assert totals["by_label"]["Vendor"] == 12
         assert totals["by_relationship"]["SUPERSEDES"] == 4
-        assert totals["by_relationship"]["ANSWERED_BY"] == 40
+        # 148: each paraphrase points at the answer its original already has.
+        assert totals["by_relationship"]["ANSWERED_BY"] == 148
+        assert totals["by_relationship"]["PARAPHRASE_OF"] == 108
 
-    async def test_every_question_carries_an_embedding_of_the_pinned_width(
+    async def test_every_indexed_question_carries_an_embedding_of_the_pinned_width(
         self, session: AsyncSession
     ) -> None:
+        """Amendment P narrows this from "every question" to "every INDEXED one".
+
+        Paraphrases are calibration-only: they are embedded by `scripts/
+        calibrate` from the fixtures, on the query side, and never enter the
+        vector index. So "no embedding" is the correct state for 108 of the 148
+        nodes, and the assertion has to say which population it means or it
+        would fail on a correct graph.
+        """
         dimensions = embedding_config().model.dimensions
         result = await session.run(
-            "MATCH (q:Question) RETURN q.id AS id, size(q.embedding) AS width ORDER BY id"
+            "MATCH (q:Question) WHERE NOT q:Paraphrase "
+            "RETURN q.id AS id, size(q.embedding) AS width ORDER BY id"
         )
         widths = {record["id"]: record["width"] async for record in result}
-        assert widths
+        assert len(widths) == 40
         assert set(widths.values()) == {dimensions}

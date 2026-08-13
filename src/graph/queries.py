@@ -106,6 +106,17 @@ _VECTOR_OVERFETCH = 4
 _FIND_SIMILAR = """
 CALL db.index.vector.queryNodes($index_name, $fetch, $embedding)
 YIELD node, score
+// AMENDMENT P: paraphrases are calibration-only and are never candidates.
+//
+// Ingest already keeps them out of the vector index, so in a correctly built
+// graph this clause matches nothing. It is here anyway, because the two
+// mechanisms fail in different ways: the ingest rule protects against a
+// paraphrase being INDEXED, this one against a paraphrase being RETURNED if one
+// ever is — by a re-embed against an older graph, or a hand-run write. A
+// paraphrase carries no answer of its own, so surfacing one would put a
+// duplicate of an existing candidate into the list to compete for a rank.
+WHERE NOT node:Paraphrase
+WITH node, score
 MATCH (node)-[:BELONGS_TO]->(:Domain {key: $domain})
 // A question only qualifies if it has at least one LIVE answer this customer is
 // allowed to see. Confidential material belongs to the customer whose RFP the

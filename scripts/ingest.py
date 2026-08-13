@@ -173,7 +173,19 @@ MERGE (rfp:RFP {id: row.rfp_id})
 MERGE (rfp)-[:ISSUED_BY]->(cust)
 MERGE (d:Domain {key: row.domain})
 MERGE (q:Question {id: row.question_id})
-  SET q.text = row.question, q.normalized_text = row.normalized_question,
+  // AMENDMENT P. The second label is what keeps a paraphrase out of the
+  // retrieval candidate space. It carries no answer of its own — it points at
+  // the one its original already has — so a paraphrase surfacing as a candidate
+  // would be a duplicate of a result already in the list, competing with it for
+  // a rank it cannot deserve.
+  //
+  // A LABEL rather than a property because it is what the node IS, and because
+  // `QUESTIONS_TO_EMBED` can then exclude it without reading a field that a
+  // future writer might forget to set. Belt and braces: the label keeps them out
+  // of the vector index at all, AND `find_similar_questions` filters on it, so
+  // neither an accidental re-embed nor a new query can put one in a result.
+  SET q:Paraphrase,
+      q.text = row.question, q.normalized_text = row.normalized_question,
       q.domain = row.domain, q.question_type = row.question_type,
       q.paraphrase_of = row.paraphrase_of
 MERGE (q)-[:ASKED_IN]->(rfp)
@@ -210,11 +222,34 @@ MATCH (q:Question {id: row.question_id})
 SET q.embedding = row.embedding
 """
 
+# Amendment P: paraphrases are calibration-only and never enter the vector
+# index. Calibration embeds them itself, from the fixtures, because it needs
+# them on the QUERY side — a paraphrase models an unseen phrasing arriving in a
+# new RFP. It never needs them on the document side, which is exactly what being
+# absent from the index means.
+#
+# This is also what the shipped calibration artifact already describes: its
+# population is `query:any_family_member x document:indexed_originals`, and
+# `calibration_corpus()` marks every paraphrase `indexed: False`. Until this
+# clause existed the graph disagreed with that artifact — 148 questions were
+# embedded where the statistics assumed 40.
 QUESTIONS_TO_EMBED = """
 MATCH (q:Question)
-WHERE $force OR q.embedding IS NULL
+WHERE NOT q:Paraphrase
+  AND ($force OR q.embedding IS NULL)
 RETURN q.id AS question_id, q.normalized_text AS text
 ORDER BY question_id ASC
+"""
+
+#: Amendment P is retroactive: a graph ingested before it exists holds paraphrase
+#: vectors that are still in the index. Skipping them from now on would leave the
+#: old ones in place — invisible, and exactly the candidates the amendment
+#: forbids — so ingest clears them rather than assuming a clean volume.
+CLEAR_PARAPHRASE_EMBEDDINGS = """
+MATCH (q:Question:Paraphrase)
+WHERE q.embedding IS NOT NULL
+REMOVE q.embedding
+RETURN count(q) AS cleared
 """
 
 
@@ -375,6 +410,13 @@ async def ingest_paraphrases(session: AsyncSession, paraphrases: list[dict[str, 
         await session.run(MERGE_PARAPHRASES, rows=rows)
 
 
+async def clear_paraphrase_embeddings(session: AsyncSession) -> int:
+    """Remove any paraphrase vectors left by a pre-amendment-P ingest."""
+    result = await session.run(CLEAR_PARAPHRASE_EMBEDDINGS)
+    record = await result.single()
+    return int(record["cleared"]) if record else 0
+
+
 async def embed_questions(session: AsyncSession, *, force: bool) -> int:
     result = await session.run(QUESTIONS_TO_EMBED, force=force)
     pending = [record.data() async for record in result]
@@ -400,6 +442,7 @@ async def run(*, reembed_only: bool) -> int:
                 await ingest_registry(session)
                 await ingest_pairs(session, pairs)
                 await ingest_paraphrases(session, paraphrases)
+            cleared = await clear_paraphrase_embeddings(session)
             embedded = await embed_questions(session, force=reembed_only)
             totals = await counts(session)
     finally:
@@ -420,6 +463,9 @@ async def run(*, reembed_only: bool) -> int:
                 "mode": "reembed" if reembed_only else "ingest",
                 "pairs": len(pairs),
                 "paraphrases": len(paraphrases),
+                # Amendment P. Nonzero exactly once, on the first ingest after
+                # the amendment lands against a graph that predates it.
+                "paraphrase_embeddings_cleared": cleared,
                 "questions_embedded": embedded,
                 "nodes": totals["nodes"],
                 "relationships": totals["relationships"],
