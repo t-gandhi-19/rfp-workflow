@@ -255,6 +255,63 @@ class TestNeo4jAuth:
         assert result.fix is not None and "make up" in result.fix
         assert "stale data volume" not in (result.fix or "")
 
+    async def test_an_unresolvable_host_is_a_check_failure_not_a_traceback(self) -> None:
+        """The regression that shipped in 36de001 and hid behind a green suite.
+
+        `.env` sets NEO4J_URI to the compose service name, which resolves only
+        inside the compose network. The driver answers a host-side dial with a
+        bare `ValueError`, which is neither ServiceUnavailable nor OSError — so
+        it escaped this function and `run_preflight` alike, and preflight died
+        with a resolver traceback that reported none of the other seven checks.
+        """
+        driver = MagicMock()
+        driver.verify_connectivity = AsyncMock(
+            side_effect=ValueError("Cannot resolve address neo4j:7687")
+        )
+        driver.close = AsyncMock()
+        with patch.object(preflight, "AsyncGraphDatabase") as factory:
+            factory.driver.return_value = driver
+            result = await preflight.check_neo4j_auth(
+                {"NEO4J_URI": "bolt://neo4j:7687", "NEO4J_PASSWORD": "x"}
+            )
+        assert result.ok is False
+        # The URI it actually dialled — the observed fact, not an inferred cause.
+        assert "bolt://neo4j:7687" in result.detail
+        assert result.fix is not None
+        # Causes in check order: wrong URI for this execution context first,
+        # because that is the one `.env` produces by default.
+        assert result.fix.index("NEO4J_BOLT_PORT_HOST") < result.fix.index("make up")
+        driver.close.assert_awaited()
+
+    async def test_an_unresolvable_host_does_not_silence_the_other_checks(self) -> None:
+        """The contract this restores: run_preflight never short-circuits.
+
+        A probe that raises is worse than a probe that fails — it takes the
+        whole report with it, so one run tells you nothing about anything else.
+        """
+        driver = MagicMock()
+        driver.verify_connectivity = AsyncMock(
+            side_effect=ValueError("Cannot resolve address neo4j:7687")
+        )
+        driver.close = AsyncMock()
+        with patch.object(preflight, "AsyncGraphDatabase") as factory:
+            factory.driver.return_value = driver
+            async with ollama(INSTALLED) as oc, gateway(768) as gc:
+                results = await run_preflight(
+                    {"NEO4J_URI": "bolt://neo4j:7687", "NEO4J_PASSWORD": "x"},
+                    config=CONFIG,
+                    models=MODELS,
+                    gateway=GATEWAY,
+                    ollama_client=oc,
+                    http_client=gc,
+                    include_calibration=False,
+                )
+        # The six model-path checks still reported, plus the failed probe.
+        assert len(results) == 7
+        neo4j_results = [r for r in results if "neo4j" in r.name]
+        assert len(neo4j_results) == 1 and neo4j_results[0].ok is False
+        assert all(r.ok for r in results if "neo4j" not in r.name)
+
     async def test_a_missing_password_is_caught_before_dialling(self) -> None:
         result = await preflight.check_neo4j_auth({"NEO4J_URI": "bolt://localhost:7687"})
         assert result.ok is False

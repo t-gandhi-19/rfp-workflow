@@ -228,6 +228,11 @@ async def check_neo4j_auth(env: dict[str, str]) -> CheckResult:
     and it rejects these credentials in exactly the same way. Both surface as an
     AuthError from deep inside ingest, so the check reports the URI it actually
     dialled and the fix names both causes in the order worth checking them.
+
+    A third mode does not reach authentication at all: the URI may name a host
+    that does not resolve from wherever this is running. Every failure mode
+    returns a CheckResult — none raises — because this probe runs alongside
+    seven others whose results are worth having even when it fails.
     """
     name = "neo4j accepts the configured credentials"
     uri = env.get("NEO4J_URI") or f"bolt://localhost:{env.get('NEO4J_BOLT_PORT_HOST', '7687')}"
@@ -259,6 +264,29 @@ async def check_neo4j_auth(env: dict[str, str]) -> CheckResult:
                 "another stack may hold the default port). If it is, the data volume is "
                 "stale from a prior password — NEO4J_AUTH applies only on first "
                 "initialisation — and make nuke resets it."
+            ),
+        )
+    except ValueError:
+        # The driver raises a bare ValueError("Cannot resolve address ...") when
+        # the host does not resolve. It is neither a ServiceUnavailable nor an
+        # OSError, so it used to escape this function AND run_preflight, killing
+        # the harness with a resolver traceback and silencing every other
+        # check's result — worse than a failing probe, because a failing probe
+        # still lets the other seven report.
+        #
+        # Causes in check order. The first is by far the likeliest: `.env` sets
+        # NEO4J_URI to the compose SERVICE NAME, which resolves only inside the
+        # compose network, so any host-side caller that did not override it is
+        # dialling a name that cannot exist there.
+        return CheckResult(
+            name=name,
+            ok=False,
+            detail=f"cannot resolve the host in {uri}",
+            fix=(
+                "1. if that is a compose service name and this is running on the HOST, "
+                "override it: NEO4J_URI=bolt://localhost:$NEO4J_BOLT_PORT_HOST "
+                "(the make targets apply this as HOST_NEO4J). "
+                "2. otherwise the named host is not running: make up"
             ),
         )
     except (ServiceUnavailable, OSError) as exc:
