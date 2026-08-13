@@ -123,14 +123,31 @@ class FloorDerivation(BaseModel):
     midpoint_weight: float = Field(ge=0.0, le=1.0)
 
 
+class SeparationGuards(BaseModel):
+    """Two tiers, watching two different failures (D18).
+
+    These protect the FUTURE — they detect change against a commissioned
+    baseline. The absolute quality standard is the zero-tolerance retrieval
+    evals on real embeddings, which bind regardless of these parameters.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    #: Tier 1. Absolute floor under the MEDIAN gap: catches wholesale collapse.
+    body_min: float = Field(ge=0.0)
+    #: Tier 2 baseline, MEASURED once from real embeddings. None until then, and
+    #: calibration refuses rather than assuming a value it was never given.
+    commissioned_tail: float | None = Field(default=None, ge=0.0)
+    #: Fraction of the commissioned tail that must survive.
+    tail_retention: float = Field(gt=0.0, le=1.0)
+
+
 class CalibrationSettings(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     min_background_pairs: int = Field(gt=0)
     min_same_topic_pairs: int = Field(gt=0)
-    #: In RAW cosine. It is a gap between two raw percentiles measured before
-    #: any mapping exists, so it has no calibrated form (amendment L audit).
-    min_separation_raw: float = Field(ge=0.0)
+    separation_guards: SeparationGuards
     floor_derivation: FloorDerivation
 
 

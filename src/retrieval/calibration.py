@@ -48,6 +48,29 @@ CALIBRATION_PATH = FIXTURES / "calibration.json"
 #: The only geometry these statistics are valid in.
 GEOMETRY = "query_x_document"
 
+#: The only POPULATION these statistics are valid over (D18).
+#:
+#: Geometry says which PREFIX each side carries. Population says which TEXTS are
+#: eligible to be on each side. Both are properties of the comparison retrieval
+#: actually performs, and getting either wrong measures a distribution the
+#: system will never see:
+#:
+#:   query side     any family member — paraphrases model an unseen phrasing
+#:                  arriving in a new RFP, originals model a near-verbatim one.
+#:   document side  INDEXED ORIGINALS ONLY.
+#:
+#: The document side follows from amendment P rather than from taste. Paraphrases
+#: are excluded from the vector index because they carry no answer of their own,
+#: so no paraphrase can ever appear on the document side of a real comparison.
+#: Measuring paraphrase-against-paraphrase pairs therefore measures something the
+#: production system is structurally incapable of doing.
+#:
+#: That was not academic. Under the old all-pairs population the same-subject p05
+#: was 0.6863 and was set almost entirely by para->para pairs — two of our own
+#: rewordings compared to each other, neither of which is a question the corpus
+#: contains. They dragged the tail into the background's and failed the guard.
+POPULATION = "query:any_family_member x document:indexed_originals"
+
 
 class CalibrationError(RuntimeError):
     """Calibration is missing or does not match the current state."""
@@ -60,6 +83,10 @@ class CalibrationArtifact(BaseModel):
 
     #: Recorded explicitly, because the numbers are meaningless in any other.
     geometry: str = Field(min_length=1)
+    #: Which texts were eligible on each side (D18). Recorded for the same reason
+    #: geometry is: the anchors describe one population and no other, and a
+    #: reader comparing two artifacts needs to know they measured the same thing.
+    population: str = Field(min_length=1)
     embed_model_tag: str = Field(min_length=1)
     #: Content hash of the corpus the statistics were measured over.
     corpus_hash: str = Field(min_length=1)
@@ -87,8 +114,20 @@ class CalibrationArtifact(BaseModel):
 
     @property
     def separation(self) -> float:
-        """How far genuine matches sit above unrelated ones."""
+        """Tail separation: how far the weakest genuine match clears the
+        strongest unrelated one. The tier-2 ratchet watches this."""
         return self.same_topic_p05 - self.bg_p99
+
+    @property
+    def body_separation(self) -> float:
+        """Median separation: how far the two distributions sit apart in bulk.
+
+        The tier-1 collapse detector watches this. It is the statistic that
+        moves when something breaks wholesale — the missing-task-prefix bug
+        compressed the whole band, and a median gap notices that immediately,
+        where a tail percentile can be dragged around by a handful of pairs.
+        """
+        return self.same_topic_p50 - self.bg_p50
 
     def calibrated(self, cosine: float) -> float:
         """Map a raw cosine onto [0, 1].
@@ -149,21 +188,42 @@ def compute(
     query_vectors: dict[str, list[float]],
     document_vectors: dict[str, list[float]],
     topic_by_question: dict[str, str],
+    indexed_ids: set[str],
     embed_model_tag: str,
     corpus_content_hash: str,
     computed_at: str,
     config: ScoringConfig | None = None,
 ) -> CalibrationArtifact:
-    """Measure the anchors in query-versus-document geometry."""
+    """Measure the anchors in the geometry AND population retrieval uses (D18).
+
+    `indexed_ids` is the document side, and it is not a convenience parameter —
+    it is the population rule made explicit. Only questions that are in the
+    vector index can ever be on the document side of a real comparison, and
+    amendment P keeps paraphrases out of that index because they carry no answer
+    of their own. So a paraphrase may be a QUERY (it models an unseen phrasing
+    arriving in a new RFP) and may never be a DOCUMENT.
+
+    Both distributions are recomputed under this rule. They are never mixed with
+    statistics gathered under another one: an old background measured over all
+    pairs and a new same-subject measured over indexed documents would be two
+    different experiments reported as one.
+    """
     resolved = config or scoring_config()
+
+    unknown = sorted(indexed_ids - set(document_vectors))
+    if unknown:
+        raise CalibrationError(
+            f"indexed_ids names {len(unknown)} question(s) with no document vector: "
+            f"{unknown[:5]}. The document side must be embeddable."
+        )
 
     background: list[float] = []
     same_topic: list[float] = []
     for query_id, query_vector in sorted(query_vectors.items()):
-        for document_id, document_vector in sorted(document_vectors.items()):
+        for document_id in sorted(indexed_ids):
             if query_id == document_id:
                 continue  # a question against itself says nothing
-            score = cosine(query_vector, document_vector)
+            score = cosine(query_vector, document_vectors[document_id])
             if topic_by_question[query_id] == topic_by_question[document_id]:
                 same_topic.append(score)
             else:
@@ -208,6 +268,7 @@ def compute(
     # lives for one statement and never leaves this function.
     artifact = CalibrationArtifact(
         geometry=GEOMETRY,
+        population=POPULATION,
         embed_model_tag=embed_model_tag,
         corpus_hash=corpus_content_hash,
         computed_at=computed_at,
@@ -224,14 +285,78 @@ def compute(
         update={"derived_floor": derive_floor(artifact, config=resolved)}
     )
 
-    if artifact.separation < resolved.calibration.min_separation_raw:
-        raise CalibrationError(
-            f"separation {artifact.separation:.4f} is below the required "
-            f"{resolved.calibration.min_separation_raw}: genuine matches (p05 "
-            f"{artifact.same_topic_p05:.4f}) barely clear unrelated ones (p99 "
-            f"{artifact.bg_p99:.4f}). Retrieval cannot be trusted in this state."
-        )
+    # Tier 1 only. The erosion ratchet is a SEPARATE call, because commissioning
+    # it is the one moment its value is set from data — and a measurement
+    # function that refused to produce the very number it is about to be
+    # measured against could never be commissioned at all.
+    check_collapse(artifact, config=resolved)
     return artifact
+
+
+def check_collapse(artifact: CalibrationArtifact, *, config: ScoringConfig | None = None) -> None:
+    """Tier 1. Median gap against an absolute floor.
+
+    This is the statistic that moves when something breaks WHOLESALE. When task
+    prefixes were missing the entire similarity band compressed, and a median gap
+    notices that at once, where a tail percentile can be dragged around by a
+    handful of pairs.
+
+    Absolute rather than a ratchet, because collapse has a recognisable scale:
+    two distributions whose medians have merged are not a marginal corpus, they
+    are a systemic fault.
+    """
+    resolved = config or scoring_config()
+    guards = resolved.calibration.separation_guards
+    if artifact.body_separation < guards.body_min:
+        raise CalibrationError(
+            f"COLLAPSE: median separation {artifact.body_separation:.4f} is below "
+            f"{guards.body_min} — the two distributions have merged in bulk, not just in "
+            f"the tails (same_p50 {artifact.same_topic_p50:.4f} vs bg_p50 "
+            f"{artifact.bg_p50:.4f}). This is the signature of a systemic fault such as a "
+            f"missing task prefix or a mismatched model, not of a marginal corpus."
+        )
+
+
+def check_erosion_ratchet(
+    artifact: CalibrationArtifact, *, config: ScoringConfig | None = None
+) -> None:
+    """Tier 2. Tail gap against a retained fraction of the commissioned value.
+
+    Catches the quiet case: a corpus edit or an embedder swap that degrades the
+    tail a little at a time. No absolute threshold is defensible here — nobody
+    knows in advance what the tail SHOULD be for a given corpus and embedder —
+    so it is measured once, from real data, and thereafter defended.
+
+    Refuses outright when uncommissioned. A ratchet with no baseline is not a
+    lenient guard, it is an absent one.
+
+    WHAT THESE GUARDS ARE AND ARE NOT. They protect the FUTURE: they detect
+    change against a commissioned baseline. They are not a statement that
+    retrieval is good. The absolute quality standard is the zero-tolerance
+    retrieval evals on real embeddings, which bind regardless of guard
+    parameters. Loosening a guard can never make retrieval acceptable; it can
+    only stop the guard reporting.
+    """
+    resolved = config or scoring_config()
+    guards = resolved.calibration.separation_guards
+
+    if guards.commissioned_tail is None:
+        raise CalibrationError(
+            "the erosion ratchet has never been commissioned. Its baseline must be MEASURED "
+            "from real embeddings under the current population, once, and recorded.\n"
+            "Run: make calibrate-commission"
+        )
+
+    required = guards.commissioned_tail * guards.tail_retention
+    if artifact.separation < required:
+        raise CalibrationError(
+            f"EROSION: tail separation {artifact.separation:.4f} has fallen below "
+            f"{required:.4f} — {guards.tail_retention:.0%} of the commissioned "
+            f"{guards.commissioned_tail:.4f}. Genuine matches (p05 "
+            f"{artifact.same_topic_p05:.4f}) no longer clear unrelated ones (p99 "
+            f"{artifact.bg_p99:.4f}) by the margin this corpus was accepted at. Something "
+            f"about the corpus or the embedding model has degraded since commissioning."
+        )
 
 
 def save(artifact: CalibrationArtifact, path: Path | None = None) -> None:
@@ -282,12 +407,12 @@ def load(
 
 
 def calibration_corpus() -> list[dict[str, Any]]:
-    """Every question the statistics are measured over: corpus plus paraphrases.
+    """Every question the statistics are measured over, and which side it may take.
 
-    Both populations are needed and they play different parts. The 40 corpus
-    questions supply the background — what "unrelated, but both about cloud
-    migration" scores. The paraphrases supply the same-subject anchor, which is
-    the only reason they exist.
+    `indexed` is the population rule in data form (D18). Originals are in the
+    vector index and may appear on either side. Paraphrases are excluded from the
+    index by amendment P — they carry no answer of their own — so they may be a
+    QUERY and never a DOCUMENT.
     """
     rows: list[dict[str, Any]] = []
     with (FIXTURES / "qa_pairs.json").open(encoding="utf-8") as handle:
@@ -297,6 +422,7 @@ def calibration_corpus() -> list[dict[str, Any]]:
                     "question_id": pair["question_id"],
                     "topic_family": pair["topic_family"],
                     "question": pair["question"],
+                    "indexed": True,
                 }
             )
     with (FIXTURES / "question_paraphrases.json").open(encoding="utf-8") as handle:
@@ -306,9 +432,15 @@ def calibration_corpus() -> list[dict[str, Any]]:
                     "question_id": row["question_id"],
                     "topic_family": row["topic_family"],
                     "question": row["question"],
+                    "indexed": False,
                 }
             )
     return sorted(rows, key=lambda row: row["question_id"])
+
+
+def indexed_ids(rows: list[dict[str, Any]]) -> set[str]:
+    """The document side: questions that are actually in the vector index."""
+    return {row["question_id"] for row in rows if row["indexed"]}
 
 
 def load_for_current_corpus(path: Path | None = None) -> CalibrationArtifact:

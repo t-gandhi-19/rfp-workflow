@@ -14,7 +14,7 @@ import pytest
 
 from src.contracts import Outcome, RetrievalStatus, ScoredCandidate
 from src.contracts.thresholds import scoring_config
-from src.retrieval.calibration import GEOMETRY, CalibrationArtifact
+from src.retrieval.calibration import GEOMETRY, POPULATION, CalibrationArtifact
 from src.retrieval.scoring import (
     CandidateInput,
     blend,
@@ -62,6 +62,7 @@ FLOOR = 0.65
 # corpus shape that would fail the guards.
 CALIBRATION = CalibrationArtifact(
     geometry=GEOMETRY,
+    population=POPULATION,
     embed_model_tag="test-model:v1",
     corpus_hash="0000000000000000",
     computed_at="2026-08-13T00:00:00+00:00",

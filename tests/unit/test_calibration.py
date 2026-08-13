@@ -25,13 +25,17 @@ import pytest
 from src.contracts.thresholds import ScoringConfig, scoring_config
 from src.retrieval.calibration import (
     GEOMETRY,
+    POPULATION,
     CalibrationArtifact,
     CalibrationError,
     calibration_corpus,
+    check_collapse,
+    check_erosion_ratchet,
     compute,
     corpus_hash,
     cosine,
     derive_floor,
+    indexed_ids,
     load,
     save,
 )
@@ -45,6 +49,7 @@ def artifact(**overrides: Any) -> CalibrationArtifact:
     """A well-formed artifact. Fields the test cares about are overridden."""
     defaults: dict[str, Any] = {
         "geometry": GEOMETRY,
+        "population": POPULATION,
         "embed_model_tag": MODEL_TAG,
         "corpus_hash": "0000000000000000",
         "computed_at": COMPUTED_AT,
@@ -58,6 +63,13 @@ def artifact(**overrides: Any) -> CalibrationArtifact:
         "derived_floor": 0.666667,
     }
     return CalibrationArtifact(**{**defaults, **overrides})
+
+
+def ratcheted(commissioned_tail: float | None) -> ScoringConfig:
+    """CONFIG with a given commissioned baseline, to drive the tier-2 ratchet."""
+    data = CONFIG.model_dump()
+    data["calibration"]["separation_guards"]["commissioned_tail"] = commissioned_tail
+    return ScoringConfig.model_validate(data)
 
 
 def weighted(midpoint_weight: float) -> ScoringConfig:
@@ -106,12 +118,19 @@ def synthetic_corpus(
     return queries, documents, topics
 
 
-def measure(families: int = 40, per_family: int = 3, **kwargs: Any) -> CalibrationArtifact:
+def measure(
+    families: int = 40,
+    per_family: int = 3,
+    *,
+    indexed: set[str] | None = None,
+    **kwargs: Any,
+) -> CalibrationArtifact:
     queries, documents, topics = synthetic_corpus(families, per_family, **kwargs)
     return compute(
         query_vectors=queries,
         document_vectors=documents,
         topic_by_question=topics,
+        indexed_ids=indexed if indexed is not None else set(documents),
         embed_model_tag=MODEL_TAG,
         corpus_content_hash="deadbeefdeadbeef",
         computed_at=COMPUTED_AT,
@@ -239,7 +258,7 @@ class TestComputeGeometry:
         assert measure().geometry == GEOMETRY
 
 
-class TestGuards:
+class TestMinimumPairGuards:
     def test_too_few_background_pairs_is_refused(self) -> None:
         """Percentiles over a handful of values are that handful, renamed."""
         with pytest.raises(CalibrationError, match="cross-topic pairs"):
@@ -255,24 +274,163 @@ class TestGuards:
         with pytest.raises(CalibrationError, match="same-subject pairs"):
             measure(families=120, per_family=1)
 
-    def test_the_same_topic_minimum_is_the_configured_one(self) -> None:
-        assert CONFIG.calibration.min_same_topic_pairs == 100
 
-    def test_insufficient_separation_is_refused(self) -> None:
-        """Loose families put genuine matches on top of unrelated ones.
+class TestCollapseDetector:
+    """Tier 1. Median gap against an absolute floor.
 
-        Failing loudly at calibration time is the point: the alternative is
-        retrieval failing quietly, for the rest of the corpus's life.
-        """
-        with pytest.raises(CalibrationError, match="separation"):
-            measure(tightness=8.0)
+    This is the statistic that moves when something breaks WHOLESALE. The
+    missing-task-prefix bug compressed the entire similarity band; a median gap
+    notices that at once, where a tail percentile can be dragged around by a
+    handful of pairs — which is exactly what happened under the old population.
 
-    def test_the_separation_guard_reports_both_anchors(self) -> None:
+    Driven against hand-built artifacts rather than a synthetic corpus: collapse
+    is a property of the DISTRIBUTIONS, and constructing them directly says so
+    more clearly than tuning a generator until it misbehaves.
+    """
+
+    def test_a_healthy_body_passes(self) -> None:
+        """Medians 0.90 and 0.60 — a 0.30 gap, well clear of the 0.13 floor."""
+        check_collapse(artifact())
+
+    def test_merged_medians_are_refused(self) -> None:
+        with pytest.raises(CalibrationError, match="COLLAPSE"):
+            check_collapse(artifact(bg_p50=0.60, same_topic_p50=0.66))
+
+    def test_the_message_reports_both_medians(self) -> None:
         """The message has to say what was measured, not just that it failed."""
         with pytest.raises(CalibrationError) as caught:
-            measure(tightness=8.0)
+            check_collapse(artifact(bg_p50=0.60, same_topic_p50=0.66))
         message = str(caught.value)
-        assert "p05" in message and "p99" in message
+        assert "same_p50" in message and "bg_p50" in message
+
+    def test_it_names_the_systemic_cause(self) -> None:
+        """Collapse means a fault, not a marginal corpus — the message says so."""
+        with pytest.raises(CalibrationError, match="task prefix"):
+            check_collapse(artifact(bg_p50=0.60, same_topic_p50=0.66))
+
+    def test_exactly_at_the_floor_passes(self) -> None:
+        """0.60 -> 0.73 is a gap of 0.13, the configured minimum. Inclusive."""
+        subject = artifact(bg_p50=0.60, same_topic_p50=0.73)
+        assert subject.body_separation == pytest.approx(0.13)
+        check_collapse(subject)
+
+    def test_body_separation_is_the_median_gap(self) -> None:
+        assert artifact().body_separation == pytest.approx(0.90 - 0.60)
+
+
+class TestPopulationRule:
+    """D18. Only INDEXED questions may appear on the document side.
+
+    Paraphrases are excluded from the vector index (amendment P) because they
+    carry no answer of their own, so a paraphrase can never be the document half
+    of a real comparison. Measuring para->para pairs measured something the
+    production system is structurally incapable of doing — and on real
+    embeddings those pairs set the same-subject p05 and failed the guard.
+    """
+
+    def test_the_population_is_recorded_on_the_artifact(self) -> None:
+        assert measure().population == POPULATION
+
+    def test_a_non_indexed_question_never_appears_as_a_document(self) -> None:
+        """Only the first member of each family is indexed; the rest are queries."""
+        queries, documents, topics = synthetic_corpus(40, 4)
+        everything = sorted(documents)
+        originals = {qid for qid in everything if qid.endswith("-0")}
+
+        full = compute(
+            query_vectors=queries,
+            document_vectors=documents,
+            topic_by_question=topics,
+            indexed_ids=set(everything),
+            embed_model_tag=MODEL_TAG,
+            corpus_content_hash="x",
+            computed_at=COMPUTED_AT,
+        )
+        restricted = compute(
+            query_vectors=queries,
+            document_vectors=documents,
+            topic_by_question=topics,
+            indexed_ids=originals,
+            embed_model_tag=MODEL_TAG,
+            corpus_content_hash="x",
+            computed_at=COMPUTED_AT,
+        )
+        # 160 queries x 40 documents, minus the 40 self-pairs.
+        assert restricted.background_pair_count + restricted.same_topic_pair_count == 160 * 40 - 40
+        assert restricted.same_topic_pair_count == 40 * 3  # 4 members, 1 document, no self
+        assert full.same_topic_pair_count > restricted.same_topic_pair_count
+
+    def test_an_indexed_id_with_no_vector_is_refused(self) -> None:
+        """A document side naming something unembeddable is a caller bug."""
+        queries, documents, topics = synthetic_corpus(40, 3)
+        with pytest.raises(CalibrationError, match="no document vector"):
+            compute(
+                query_vectors=queries,
+                document_vectors=documents,
+                topic_by_question=topics,
+                indexed_ids={"not-a-real-id"},
+                embed_model_tag=MODEL_TAG,
+                corpus_content_hash="x",
+                computed_at=COMPUTED_AT,
+            )
+
+    def test_the_shipped_corpus_marks_only_originals_as_indexed(self) -> None:
+        rows = calibration_corpus()
+        indexed = indexed_ids(rows)
+        assert len(indexed) == 40
+        assert all(not qid.startswith("HQP-") for qid in indexed)
+        assert all(row["indexed"] is row["question_id"].startswith("HQ-") for row in rows)
+
+
+class TestErosionRatchet:
+    """Tier 2. Measured once from real data, then defended.
+
+    `min_separation_raw: 0.02` used to do this job. It predated every real
+    measurement and was the last underived constant in the scoring config.
+    """
+
+    def test_it_refuses_when_uncommissioned(self) -> None:
+        """A ratchet with no baseline is not lenient, it is absent."""
+        with pytest.raises(CalibrationError, match="never been commissioned"):
+            check_erosion_ratchet(artifact(), config=ratcheted(None))
+
+    def test_the_uncommissioned_message_names_the_command(self) -> None:
+        with pytest.raises(CalibrationError, match="make calibrate-commission"):
+            check_erosion_ratchet(artifact(), config=ratcheted(None))
+
+    def test_a_tail_holding_its_commissioned_value_passes(self) -> None:
+        subject = artifact()  # tail = 0.85 - 0.75 = 0.10
+        check_erosion_ratchet(subject, config=ratcheted(0.10))
+
+    def test_a_tail_just_above_the_retained_fraction_passes(self) -> None:
+        """Commissioned 0.15, retention 0.6 -> required 0.09. Artifact holds 0.10."""
+        check_erosion_ratchet(artifact(), config=ratcheted(0.15))
+
+    def test_a_tail_just_below_the_retained_fraction_is_refused(self) -> None:
+        """Commissioned 0.17 -> required 0.102, just above the artifact's 0.10."""
+        with pytest.raises(CalibrationError, match="EROSION"):
+            check_erosion_ratchet(artifact(), config=ratcheted(0.17))
+
+    def test_an_eroded_tail_is_refused(self) -> None:
+        """Commissioned at 0.30, now 0.10 — well under 60% retention."""
+        with pytest.raises(CalibrationError, match="EROSION"):
+            check_erosion_ratchet(artifact(), config=ratcheted(0.30))
+
+    def test_the_erosion_message_reports_the_commissioned_value(self) -> None:
+        with pytest.raises(CalibrationError) as caught:
+            check_erosion_ratchet(artifact(), config=ratcheted(0.30))
+        assert "0.3000" in str(caught.value)
+
+    def test_the_two_tiers_watch_different_statistics(self) -> None:
+        """A corpus can pass one and fail the other, which is why there are two.
+
+        Body separation is healthy; the tail has eroded. A single threshold on
+        either statistic alone would miss one of these failures.
+        """
+        subject = artifact(same_topic_p05=0.7550)  # tail 0.0750, body still 0.30
+        check_collapse(subject)
+        with pytest.raises(CalibrationError, match="EROSION"):
+            check_erosion_ratchet(subject, config=ratcheted(0.30))
 
 
 class TestCorpusHash:

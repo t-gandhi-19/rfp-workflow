@@ -127,12 +127,42 @@ calibration:
   # The same-topic p05 must clear the background p99 by at least this much, or
   # ingest fails loudly rather than retrieval failing quietly.
   #
-  # RAW COSINE, not calibrated — the audit amendment L asked for turned this up
-  # as the one other similarity-anchored constant in this file. It is a gap
-  # between two raw percentiles, measured before any mapping exists, so it
-  # cannot be expressed in calibrated space: calibration is what the separation
-  # has to be sufficient to justify computing.
-  min_separation_raw: 0.02
+  # THE TWO-TIER SEPARATION GUARD (D18).
+  #
+  # `min_separation_raw: 0.02` used to live here. It predated every real
+  # measurement — a number chosen before anyone knew what nomic-embed-text
+  # scored on this corpus — and it was the last underived constant in this file.
+  # It also conflated two different failures. The key is REMOVED, not aliased.
+  #
+  # WHAT THESE GUARDS ARE FOR. They protect the FUTURE: they detect change
+  # against a commissioned baseline. The absolute quality standard is the
+  # zero-tolerance retrieval evals on real embeddings, which bind regardless of
+  # guard parameters. Loosening a guard here can never make retrieval
+  # acceptable; it can only stop the guard reporting.
+  #
+  # Both values are RAW COSINE gaps, measured before any mapping exists.
+  separation_guards:
+    # TIER 1 — collapse detector. Median gap, absolute floor.
+    #
+    # DERIVATION: 50% of the commissioned median gap. Set once at commissioning
+    # and not a ratchet: it exists to catch wholesale band overlap (the
+    # missing-task-prefix class of fault), where the tail statistic can be
+    # dragged around by a handful of pairs but the median cannot.
+    #   commissioned median gap: (generated below)
+    #   body_min = 0.50 x that
+    body_min: 0.13
+
+    # TIER 2 — erosion ratchet. Tail gap, as a retained fraction of the
+    # commissioned measurement.
+    #
+    # No absolute threshold is defensible here: nobody knows in advance what the
+    # tail SHOULD be for a given corpus and embedder. So it is measured once,
+    # from real data, and thereafter defended. `make calibrate-commission`
+    # is the one command that may set it, and it stamps the derivation below.
+    #
+    # null means never commissioned — calibration refuses rather than assuming.
+    commissioned_tail: null
+    tail_retention: 0.6
 
   # HOW the floor is derived, which is what belongs in config. The VALUE it
   # derives to belongs in the artifact (amendment O).
@@ -152,13 +182,16 @@ calibration:
     midpoint_weight: 0.5
 
   # GENERATED — do not hand-edit. Written by `make calibrate` so a human reading
-  # this file can see what the rule above last produced, without opening the
+  # this file can see what the rules above last produced, without opening the
   # artifact. Retrieval never reads these lines.
   #
   #   last derived floor: (not yet computed against real embeddings)
   #   geometry:           query_x_document
+  #   population:         —
   #   computed at:        —
   #   embed model:        —
+  #   body separation:    —
+  #   tail separation:    —
 
 graph_multiplier:
   # Applied to vector_score before blending. Encodes what the graph knows that

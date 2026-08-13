@@ -32,7 +32,12 @@ from src.gateway.preflight import (
     ollama_base_url_for_host,
     run_preflight,
 )
-from src.retrieval.calibration import GEOMETRY, CalibrationArtifact, CalibrationError
+from src.retrieval.calibration import (
+    GEOMETRY,
+    POPULATION,
+    CalibrationArtifact,
+    CalibrationError,
+)
 
 OLLAMA = "http://localhost:11434"
 GATEWAY = GatewayClient(base_url="http://gateway.test", api_key="k")
@@ -228,6 +233,7 @@ class TestCalibrationFreshness:
         """The derived floor is shown, because it is the number that matters."""
         artifact = CalibrationArtifact(
             geometry=GEOMETRY,
+            population=POPULATION,
             embed_model_tag="nomic-embed-text:v1.5",
             corpus_hash="abcdef0123456789",
             computed_at="2026-08-13T00:00:00+00:00",

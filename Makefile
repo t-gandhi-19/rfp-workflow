@@ -209,6 +209,15 @@ calibrate-dry: check-env ## Measure and print the anchors without writing anythi
 	@set -a && source .env && set +a && \
 		$(PREFLIGHT_ENV) $(RUN) python -m scripts.calibrate --dry-run
 
+.PHONY: calibrate-commission
+calibrate-commission: check-env ## SET the separation guard baselines from a real measurement (D18)
+	@# The one command that may move the baselines. Ordinary `make calibrate` is
+	@# JUDGED against them — a ratchet that resets itself on every run never
+	@# catches anything. Refuses to run against the stand-in embedder.
+	@set -a && source .env && set +a && \
+		$(PREFLIGHT_ENV) WRITE_API_PORT=$${WRITE_API_PORT:-8001} \
+		$(RUN) python -m scripts.calibrate --commission
+
 .PHONY: ingest
 ingest: preflight-pre-ingest apply-schema ## Load fixtures into the graph, then calibrate
 	@# Calibration runs LAST and is part of ingest rather than a step someone
