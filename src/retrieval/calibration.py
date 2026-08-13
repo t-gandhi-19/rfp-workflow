@@ -114,8 +114,26 @@ class CalibrationArtifact(BaseModel):
 
     @property
     def separation(self) -> float:
-        """Tail separation: how far the weakest genuine match clears the
-        strongest unrelated one. The tier-2 ratchet watches this."""
+        """Tail separation. REPORTED, NOT GATED (D19).
+
+        How far the weakest genuine match clears the strongest unrelated one.
+        Genuinely informative about how hard the paraphrase set is, and it is
+        printed and stored for that reason — but it gated tier 2 until it proved
+        it could not:
+
+        * **Open-ended downward.** The same-subject lower tail is set by the
+          hardest legitimate paraphrases. Where that boundary sits is an
+          authorship judgement with no crisp edge.
+        * **Non-convergent under data addition.** Every paraphrase added to firm
+          up the estimate is also a new candidate for "worst match". Going from
+          two paraphrases per family to three moved this from +0.0237 to
+          -0.0245 while every operational margin held or improved.
+        * **Correlated observations.** Version families contribute pairs against
+          two byte-identical documents, so tail observations double-count.
+
+        A statistic that is open-ended, non-convergent and correlated is not
+        commissioning-grade at any retention factor.
+        """
         return self.same_topic_p05 - self.bg_p99
 
     @property
@@ -317,45 +335,101 @@ def check_collapse(artifact: CalibrationArtifact, *, config: ScoringConfig | Non
         )
 
 
-def check_erosion_ratchet(
-    artifact: CalibrationArtifact, *, config: ScoringConfig | None = None
-) -> None:
-    """Tier 2. Tail gap against a retained fraction of the commissioned value.
+#: The three golden questions the corpus deliberately cannot answer.
+UNANSWERABLE = ("2.7", "2.8", "3.5")
+#: Deliberately NOT gated. 3.4 is refused on legal grounds regardless of
+#: retrieval; 4.2 is owned by Phase 4's pricing block. Reported only.
+BAITS = ("3.4", "4.2")
 
-    Catches the quiet case: a corpus edit or an embedder swap that degrades the
-    tail a little at a time. No absolute threshold is defensible here — nobody
-    knows in advance what the tail SHOULD be for a given corpus and embedder —
-    so it is measured once, from real data, and thereafter defended.
+
+class ProbeLanding(BaseModel):
+    """Where one golden question landed against the derived floor."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    number: str = Field(min_length=1)
+    kind: str = Field(min_length=1)
+    raw: float
+    calibrated: float
+    #: Signed so that POSITIVE is always correct: distance below the floor for
+    #: an unanswerable, above it for an answerable.
+    margin: float
+
+
+def check_floor_discrimination(
+    landings: list[ProbeLanding], *, config: ScoringConfig | None = None
+) -> None:
+    """Tier 2 (D19). Does the derived floor still separate answerable from not?
+
+    THE PROBES GATE; THEY NEVER DERIVE. The floor's value comes only from
+    corpus-internal statistics. This check is a canary verifying that the
+    derived floor still discriminates — the zero-tolerance eval core embedded
+    into calibration, so that a corpus or model change run through
+    `make calibrate` alone cannot silently ship a non-discriminating floor.
+
+    Gated: each unanswerable must sit below the floor, and the weakest
+    answerable above it, by at least `retention` of its commissioned margin.
+    Advisory: the two baits are reported and never gated.
 
     Refuses outright when uncommissioned. A ratchet with no baseline is not a
     lenient guard, it is an absent one.
 
-    WHAT THESE GUARDS ARE AND ARE NOT. They protect the FUTURE: they detect
-    change against a commissioned baseline. They are not a statement that
-    retrieval is good. The absolute quality standard is the zero-tolerance
-    retrieval evals on real embeddings, which bind regardless of guard
-    parameters. Loosening a guard can never make retrieval acceptable; it can
-    only stop the guard reporting.
+    WHAT THIS GUARD IS AND IS NOT. It protects the FUTURE: it detects change
+    against a commissioned baseline. It is not a statement that retrieval is
+    good. The absolute quality standard is the zero-tolerance retrieval evals on
+    real embeddings, which bind regardless of guard parameters. Loosening a
+    guard can never make retrieval acceptable; it can only stop it reporting.
     """
     resolved = config or scoring_config()
-    guards = resolved.calibration.separation_guards
+    rule = resolved.calibration.separation_guards.floor_discrimination
+    baseline = rule.commissioned
 
-    if guards.commissioned_tail is None:
+    if not baseline.commissioned():
         raise CalibrationError(
-            "the erosion ratchet has never been commissioned. Its baseline must be MEASURED "
-            "from real embeddings under the current population, once, and recorded.\n"
-            "Run: make calibrate-commission"
+            "the floor-discrimination ratchet has never been commissioned. Its baselines "
+            "must be MEASURED from real embeddings against the derived floor, once, and "
+            "recorded.\nRun: make calibrate-commission"
         )
 
-    required = guards.commissioned_tail * guards.tail_retention
-    if artifact.separation < required:
+    by_number = {landing.number: landing for landing in landings}
+    commissioned_unanswerable = {
+        "2.7": baseline.unanswerable_2_7,
+        "2.8": baseline.unanswerable_2_8,
+        "3.5": baseline.unanswerable_3_5,
+    }
+
+    for number in UNANSWERABLE:
+        landing = by_number.get(number)
+        if landing is None:
+            raise CalibrationError(f"probe {number} was not measured; cannot gate on it")
+        commissioned = commissioned_unanswerable[number]
+        if commissioned is None:  # pragma: no cover - commissioned() rules this out
+            raise CalibrationError(f"probe {number} has no commissioned baseline")
+        required = commissioned * rule.retention
+        if landing.margin < required:
+            raise CalibrationError(
+                f"FLOOR NO LONGER DISCRIMINATES: unanswerable {number} sits "
+                f"{landing.margin:+.4f} below the floor, under the required {required:.4f} "
+                f"({rule.retention:.0%} of the commissioned {commissioned:.4f}). A question "
+                f"the corpus cannot answer is approaching the match floor, so retrieval is "
+                f"drifting towards answering it. This is a corpus or embedding-model "
+                f"question, not a threshold to adjust."
+            )
+
+    answerable = [landing for landing in landings if landing.kind == "answerable"]
+    if not answerable:
+        raise CalibrationError("no answerable probes were measured; cannot gate on them")
+    weakest = min(answerable, key=lambda landing: landing.margin)
+    if baseline.min_answerable is None:  # pragma: no cover - commissioned() rules this out
+        raise CalibrationError("no commissioned baseline for the weakest answerable")
+    required_answerable = baseline.min_answerable * rule.retention
+    if weakest.margin < required_answerable:
         raise CalibrationError(
-            f"EROSION: tail separation {artifact.separation:.4f} has fallen below "
-            f"{required:.4f} — {guards.tail_retention:.0%} of the commissioned "
-            f"{guards.commissioned_tail:.4f}. Genuine matches (p05 "
-            f"{artifact.same_topic_p05:.4f}) no longer clear unrelated ones (p99 "
-            f"{artifact.bg_p99:.4f}) by the margin this corpus was accepted at. Something "
-            f"about the corpus or the embedding model has degraded since commissioning."
+            f"FLOOR NO LONGER DISCRIMINATES: answerable {weakest.number} clears the floor by "
+            f"only {weakest.margin:+.4f}, under the required {required_answerable:.4f} "
+            f"({rule.retention:.0%} of the commissioned {baseline.min_answerable:.4f}). A "
+            f"question the corpus CAN answer is approaching the floor from above, so "
+            f"retrieval is drifting towards refusing it."
         )
 
 

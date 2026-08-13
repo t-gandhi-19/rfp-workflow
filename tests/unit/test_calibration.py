@@ -28,9 +28,10 @@ from src.retrieval.calibration import (
     POPULATION,
     CalibrationArtifact,
     CalibrationError,
+    ProbeLanding,
     calibration_corpus,
     check_collapse,
-    check_erosion_ratchet,
+    check_floor_discrimination,
     compute,
     corpus_hash,
     cosine,
@@ -65,11 +66,38 @@ def artifact(**overrides: Any) -> CalibrationArtifact:
     return CalibrationArtifact(**{**defaults, **overrides})
 
 
-def ratcheted(commissioned_tail: float | None) -> ScoringConfig:
-    """CONFIG with a given commissioned baseline, to drive the tier-2 ratchet."""
+def ratcheted(**overrides: float | None) -> ScoringConfig:
+    """CONFIG with given commissioned probe baselines, to drive the tier-2 gate."""
     data = CONFIG.model_dump()
-    data["calibration"]["separation_guards"]["commissioned_tail"] = commissioned_tail
+    commissioned = data["calibration"]["separation_guards"]["floor_discrimination"]["commissioned"]
+    commissioned.update(overrides)
     return ScoringConfig.model_validate(data)
+
+
+def uncommissioned() -> ScoringConfig:
+    return ratcheted(
+        unanswerable_2_7=None,
+        unanswerable_2_8=None,
+        unanswerable_3_5=None,
+        min_answerable=None,
+    )
+
+
+def landing(number: str, kind: str, margin: float) -> ProbeLanding:
+    """A probe landing with only the fields the gate reads set meaningfully."""
+    return ProbeLanding(number=number, kind=kind, raw=0.7, calibrated=0.5, margin=margin)
+
+
+def healthy_landings(**margins: float) -> list[ProbeLanding]:
+    """Three unanswerables and one answerable, all comfortably correct."""
+    defaults = {"2.7": 0.30, "2.8": 0.28, "3.5": 0.17, "answerable": 0.24}
+    defaults.update(margins)
+    return [
+        landing("2.7", "unanswerable", defaults["2.7"]),
+        landing("2.8", "unanswerable", defaults["2.8"]),
+        landing("3.5", "unanswerable", defaults["3.5"]),
+        landing("1.4", "answerable", defaults["answerable"]),
+    ]
 
 
 def weighted(midpoint_weight: float) -> ScoringConfig:
@@ -308,11 +336,24 @@ class TestCollapseDetector:
         with pytest.raises(CalibrationError, match="task prefix"):
             check_collapse(artifact(bg_p50=0.60, same_topic_p50=0.66))
 
-    def test_exactly_at_the_floor_passes(self) -> None:
-        """0.60 -> 0.73 is a gap of 0.13, the configured minimum. Inclusive."""
-        subject = artifact(bg_p50=0.60, same_topic_p50=0.73)
-        assert subject.body_separation == pytest.approx(0.13)
-        check_collapse(subject)
+    def test_just_above_the_floor_passes(self) -> None:
+        """Either side of the commissioned minimum, which is 0.1394.
+
+        Not tested at exact equality: `same_p50 - bg_p50` is a float
+        subtraction, so "exactly the floor" is not a state a caller can
+        reliably construct or a guard can meaningfully promise.
+        """
+        floor = CONFIG.calibration.separation_guards.body_min
+        check_collapse(artifact(bg_p50=0.60, same_topic_p50=0.60 + floor + 1e-6))
+
+    def test_just_below_the_floor_is_refused(self) -> None:
+        floor = CONFIG.calibration.separation_guards.body_min
+        with pytest.raises(CalibrationError, match="COLLAPSE"):
+            check_collapse(artifact(bg_p50=0.60, same_topic_p50=0.60 + floor - 1e-3))
+
+    def test_the_commissioned_floor_is_half_the_measured_median_gap(self) -> None:
+        """Recorded so a change to either side shows up as a failing test."""
+        assert CONFIG.calibration.separation_guards.body_min == pytest.approx(0.1394)
 
     def test_body_separation_is_the_median_gap(self) -> None:
         assert artifact().body_separation == pytest.approx(0.90 - 0.60)
@@ -382,55 +423,99 @@ class TestPopulationRule:
         assert all(row["indexed"] is row["question_id"].startswith("HQ-") for row in rows)
 
 
-class TestErosionRatchet:
-    """Tier 2. Measured once from real data, then defended.
+class TestFloorDiscrimination:
+    """Tier 2 (D19). THE PROBES GATE; THEY NEVER DERIVE.
 
-    `min_separation_raw: 0.02` used to do this job. It predated every real
-    measurement and was the last underived constant in the scoring config.
+    The floor's value comes only from corpus-internal statistics. This check is
+    a canary verifying the derived floor still discriminates — the
+    zero-tolerance eval core embedded into calibration, so a corpus or model
+    change run through `make calibrate` alone cannot silently ship a
+    non-discriminating floor.
     """
 
     def test_it_refuses_when_uncommissioned(self) -> None:
         """A ratchet with no baseline is not lenient, it is absent."""
         with pytest.raises(CalibrationError, match="never been commissioned"):
-            check_erosion_ratchet(artifact(), config=ratcheted(None))
+            check_floor_discrimination(healthy_landings(), config=uncommissioned())
 
     def test_the_uncommissioned_message_names_the_command(self) -> None:
         with pytest.raises(CalibrationError, match="make calibrate-commission"):
-            check_erosion_ratchet(artifact(), config=ratcheted(None))
+            check_floor_discrimination(healthy_landings(), config=uncommissioned())
 
-    def test_a_tail_holding_its_commissioned_value_passes(self) -> None:
-        subject = artifact()  # tail = 0.85 - 0.75 = 0.10
-        check_erosion_ratchet(subject, config=ratcheted(0.10))
+    def test_probes_holding_their_commissioned_margins_pass(self) -> None:
+        check_floor_discrimination(healthy_landings())
 
-    def test_a_tail_just_above_the_retained_fraction_passes(self) -> None:
-        """Commissioned 0.15, retention 0.6 -> required 0.09. Artifact holds 0.10."""
-        check_erosion_ratchet(artifact(), config=ratcheted(0.15))
+    def test_an_unanswerable_drifting_towards_the_floor_is_refused(self) -> None:
+        """Commissioned 0.3055 at retention 0.6 requires 0.1833."""
+        with pytest.raises(CalibrationError, match="FLOOR NO LONGER DISCRIMINATES"):
+            check_floor_discrimination(healthy_landings(**{"2.7": 0.18}))
 
-    def test_a_tail_just_below_the_retained_fraction_is_refused(self) -> None:
-        """Commissioned 0.17 -> required 0.102, just above the artifact's 0.10."""
-        with pytest.raises(CalibrationError, match="EROSION"):
-            check_erosion_ratchet(artifact(), config=ratcheted(0.17))
+    def test_the_message_names_the_failing_probe(self) -> None:
+        with pytest.raises(CalibrationError, match=r"unanswerable 3\.5"):
+            check_floor_discrimination(healthy_landings(**{"3.5": 0.05}))
 
-    def test_an_eroded_tail_is_refused(self) -> None:
-        """Commissioned at 0.30, now 0.10 — well under 60% retention."""
-        with pytest.raises(CalibrationError, match="EROSION"):
-            check_erosion_ratchet(artifact(), config=ratcheted(0.30))
+    def test_an_unanswerable_that_clears_the_floor_is_refused(self) -> None:
+        """A negative margin means it now MATCHES, which is the whole failure."""
+        with pytest.raises(CalibrationError, match="drifting towards answering"):
+            check_floor_discrimination(healthy_landings(**{"2.8": -0.01}))
 
-    def test_the_erosion_message_reports_the_commissioned_value(self) -> None:
-        with pytest.raises(CalibrationError) as caught:
-            check_erosion_ratchet(artifact(), config=ratcheted(0.30))
-        assert "0.3000" in str(caught.value)
+    def test_a_weakening_answerable_is_refused(self) -> None:
+        """Commissioned 0.2405 at retention 0.6 requires 0.1443."""
+        with pytest.raises(CalibrationError, match="drifting towards refusing"):
+            check_floor_discrimination(healthy_landings(answerable=0.14))
 
-    def test_the_two_tiers_watch_different_statistics(self) -> None:
-        """A corpus can pass one and fail the other, which is why there are two.
+    def test_just_above_the_retained_fraction_passes(self) -> None:
+        check_floor_discrimination(healthy_landings(answerable=0.145))
 
-        Body separation is healthy; the tail has eroded. A single threshold on
-        either statistic alone would miss one of these failures.
+    def test_a_missing_gated_probe_is_refused(self) -> None:
+        """Skipping a probe would make the gate report on less than it claims."""
+        partial = [item for item in healthy_landings() if item.number != "2.8"]
+        with pytest.raises(CalibrationError, match=r"probe 2\.8 was not measured"):
+            check_floor_discrimination(partial)
+
+    def test_no_answerable_probes_is_refused(self) -> None:
+        unanswerable_only = [item for item in healthy_landings() if item.kind == "unanswerable"]
+        with pytest.raises(CalibrationError, match="no answerable probes"):
+            check_floor_discrimination(unanswerable_only)
+
+    def test_baits_are_never_gated(self) -> None:
+        """3.4 is refused on legal grounds regardless of retrieval; 4.2 is
+        Phase 4's pricing block. A bait anywhere must not fail the gate.
         """
-        subject = artifact(same_topic_p05=0.7550)  # tail 0.0750, body still 0.30
+        with_baits = [*healthy_landings(), landing("4.2", "bait", -0.5)]
+        check_floor_discrimination(with_baits)
+
+    def test_the_two_tiers_watch_different_things(self) -> None:
+        """A corpus can pass one and fail the other, which is why there are two."""
+        check_collapse(artifact())
+        with pytest.raises(CalibrationError, match="FLOOR NO LONGER DISCRIMINATES"):
+            check_floor_discrimination(healthy_landings(**{"2.7": 0.0}))
+
+
+class TestTailSeparationIsDiagnosticOnly:
+    """D19 demoted `same_p05 - bg_p99`. It is reported and gates nothing.
+
+    It was a PROXY and it diverged from its target: open-ended downward (the
+    same-subject tail is set by the hardest legitimate paraphrase, an authorship
+    boundary with no crisp edge), non-convergent under data addition (two
+    paraphrases per family gave +0.0237, three gave -0.0245), and correlated
+    (version families contribute pairs against two byte-identical documents).
+    It failed while every operational margin held or improved.
+    """
+
+    def test_it_is_still_computed_and_reported(self) -> None:
+        assert artifact().separation == pytest.approx(0.85 - 0.75)
+
+    def test_a_negative_tail_no_longer_blocks_calibration(self) -> None:
+        """The exact shape of the real failure: tail negative, body healthy.
+
+        Under D18 this refused. Under D19 tier 1 passes it and the probes
+        decide whether the floor is acceptable.
+        """
+        subject = artifact(same_topic_p05=0.6400, bg_p99=0.7000)
+        assert subject.separation < 0
         check_collapse(subject)
-        with pytest.raises(CalibrationError, match="EROSION"):
-            check_erosion_ratchet(subject, config=ratcheted(0.30))
+        check_floor_discrimination(healthy_landings())
 
 
 class TestCorpusHash:

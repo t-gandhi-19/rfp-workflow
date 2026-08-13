@@ -123,8 +123,54 @@ class FloorDerivation(BaseModel):
     midpoint_weight: float = Field(ge=0.0, le=1.0)
 
 
+class CommissionedProbes(BaseModel):
+    """Margins measured at commissioning, in calibrated space (D19).
+
+    None until commissioned; calibration refuses rather than assuming a value it
+    was never given.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    #: How far each unanswerable sat BELOW the floor.
+    unanswerable_2_7: float | None = Field(default=None, ge=0.0)
+    unanswerable_2_8: float | None = Field(default=None, ge=0.0)
+    unanswerable_3_5: float | None = Field(default=None, ge=0.0)
+    #: How far the WEAKEST answerable sat above it.
+    min_answerable: float | None = Field(default=None, ge=0.0)
+
+    def commissioned(self) -> bool:
+        return all(
+            value is not None
+            for value in (
+                self.unanswerable_2_7,
+                self.unanswerable_2_8,
+                self.unanswerable_3_5,
+                self.min_answerable,
+            )
+        )
+
+
+class FloorDiscrimination(BaseModel):
+    """Tier 2 (D19): does the derived floor still tell answerable from not?
+
+    Replaces the `same_p05 - bg_p99` tail statistic, which was demoted to a
+    reported diagnostic. That statistic gated a PROXY: the same-subject lower
+    tail is set by the hardest legitimate paraphrases, which is an open-ended
+    authorship boundary with no crisp edge, so adding data to firm the estimate
+    also adds worst-match candidates. It failed while every operational margin
+    held or improved — the definition of a proxy diverging from its target.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    #: Fraction of each commissioned margin that must survive.
+    retention: float = Field(gt=0.0, le=1.0)
+    commissioned: CommissionedProbes
+
+
 class SeparationGuards(BaseModel):
-    """Two tiers, watching two different failures (D18).
+    """Two tiers, watching two different failures (D18, revised by D19).
 
     These protect the FUTURE — they detect change against a commissioned
     baseline. The absolute quality standard is the zero-tolerance retrieval
@@ -135,11 +181,8 @@ class SeparationGuards(BaseModel):
 
     #: Tier 1. Absolute floor under the MEDIAN gap: catches wholesale collapse.
     body_min: float = Field(ge=0.0)
-    #: Tier 2 baseline, MEASURED once from real embeddings. None until then, and
-    #: calibration refuses rather than assuming a value it was never given.
-    commissioned_tail: float | None = Field(default=None, ge=0.0)
-    #: Fraction of the commissioned tail that must survive.
-    tail_retention: float = Field(gt=0.0, le=1.0)
+    #: Tier 2. Probe-based, on the derived floor's actual discrimination.
+    floor_discrimination: FloorDiscrimination
 
 
 class CalibrationSettings(BaseModel):
