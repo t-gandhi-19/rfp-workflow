@@ -4,11 +4,32 @@ Hand-computed values throughout. A test that recomputes the formula it is
 checking proves only that the code is self-consistent; these assert numbers
 worked out independently from the config, so a changed weight fails loudly
 rather than silently re-deriving itself.
+
+TWO CALIBRATION ARTIFACTS, deliberately, because they answer different
+questions:
+
+    CALIBRATION   invented anchors (bg_p50 0.60, same_p50 0.90) chosen to divide
+                  cleanly. Used where the ARITHMETIC is what is under test —
+                  clamping, weight redistribution, tie-breaking — and a value
+                  that works out to 0.8333 rather than 0.7424 makes the
+                  derivation readable in the assertion.
+
+    COMMISSIONED  the artifact retrieval actually reads, loaded from
+                  fixtures/calibration.json. Used for every property that is
+                  about BEHAVIOUR on this corpus.
+
+The second exists because the first cannot answer the operational question. The
+measured band is narrow — bg_p50 0.4930 to same_p50 0.7718, a span of 0.2788 —
+and that narrowness is the entire reason calibration exists. Ordering and floor
+properties asserted only on a band two or three times wider would demonstrate
+the arithmetic while saying nothing about whether the shipped floor of 0.5975
+separates anything, which is the claim that matters.
 """
 
 from __future__ import annotations
 
 import math
+from pathlib import Path
 
 import pytest
 
@@ -77,6 +98,33 @@ CALIBRATION = CalibrationArtifact(
 )
 
 
+# ---------------------------------------------------------------------------
+# The COMMISSIONED artifact — the real one, as shipped.
+#
+# The synthetic artifact above exists so the ARITHMETIC can be checked by hand
+# against numbers that divide cleanly. It cannot tell anyone whether the shipped
+# scoring behaves sensibly on the band this corpus actually produces, because
+# its anchors are invented.
+#
+# So the properties that matter operationally — the ones the retrieval evals
+# depend on — are asserted against the measured artifact instead. Loaded rather
+# than copied, so it cannot drift from the file retrieval reads; the numbers it
+# is expected to hold are pinned once, in
+# `TestTheCommissionedStatisticsAreWhatTheseTestsAssume`, so a recalibration
+# fails there with a readable diff instead of scattering failures across the
+# file.
+# ---------------------------------------------------------------------------
+COMMISSIONED = CalibrationArtifact.model_validate_json(
+    (Path(__file__).resolve().parents[2] / "fixtures" / "calibration.json").read_text(
+        encoding="utf-8"
+    )
+)
+
+#: The width of the measured band. Every calibrated value below is a position in
+#: it: calibrated(raw) = (raw - bg_p50) / SPAN.
+SPAN = COMMISSIONED.same_topic_p50 - COMMISSIONED.bg_p50
+
+
 def candidate(
     *,
     node: str,
@@ -102,6 +150,23 @@ def rank(
 ) -> list[ScoredCandidate]:
     """Score against the test artifact. Calibration is required, never defaulted."""
     return score_candidates(candidates, calibration=CALIBRATION, rerank_scores=rerank_scores)
+
+
+def rank_measured(
+    candidates: list[CandidateInput], *, rerank_scores: dict[int, float] | None = None
+) -> list[ScoredCandidate]:
+    """Score against the COMMISSIONED artifact — the shipped band."""
+    return score_candidates(candidates, calibration=COMMISSIONED, rerank_scores=rerank_scores)
+
+
+def raw_for(calibrated: float) -> float:
+    """The raw cosine that maps to `calibrated`. Inverse of the mapping.
+
+    Not exact in floating point — see
+    `test_inverting_the_mapping_is_accurate_to_one_ulp_and_no_better`. Used to
+    choose in-band inputs, never to construct an exact floor boundary.
+    """
+    return COMMISSIONED.bg_p50 + calibrated * SPAN
 
 
 class TestConfigIsWhatTheseTestsAssume:
@@ -260,25 +325,80 @@ class TestPreferenceHandComputed:
         )
 
 
-class TestOrderingProperties:
-    """The properties the retrieval evals ultimately depend on."""
+class TestTheCommissionedStatisticsAreWhatTheseTestsAssume:
+    """The measured anchors, pinned once.
 
-    def test_won_and_recent_beats_lost_and_stale_at_equal_similarity(self) -> None:
-        ranked = rank(
+    Everything in `TestOrderingInTheCommissionedBand` and
+    `TestFloorBoundaryExactness` is a position in the band these numbers define.
+    Pinning them here means a recalibration fails in ONE place, with a readable
+    diff, instead of scattering unexplained failures across the file — and it
+    makes the band the tests assume visible without opening the artifact.
+
+    These are measurements, not settings. A failure here is a prompt to re-read
+    the new calibration report and decide whether the change is expected, never
+    a prompt to edit the number.
+    """
+
+    def test_the_anchors(self) -> None:
+        assert COMMISSIONED.bg_p50 == pytest.approx(0.4930, abs=5e-5)
+        assert COMMISSIONED.bg_p99 == pytest.approx(0.6718, abs=5e-5)
+        assert COMMISSIONED.same_topic_p05 == pytest.approx(0.6474, abs=5e-5)
+        assert COMMISSIONED.same_topic_p50 == pytest.approx(0.7718, abs=5e-5)
+
+    def test_the_derived_floor(self) -> None:
+        assert COMMISSIONED.derived_floor == pytest.approx(0.5975, abs=5e-5)
+
+    def test_the_population_it_was_measured_over(self) -> None:
+        """D18. The anchors describe one population and no other."""
+        assert COMMISSIONED.geometry == GEOMETRY
+        assert COMMISSIONED.population == POPULATION
+        assert COMMISSIONED.background_pair_count == 5752
+        assert COMMISSIONED.same_topic_pair_count == 128
+
+    def test_the_body_gap_clears_tier_one(self) -> None:
+        assert COMMISSIONED.body_separation == pytest.approx(0.2788, abs=5e-5)
+        assert COMMISSIONED.body_separation >= CONFIG.calibration.separation_guards.body_min
+
+    def test_the_tail_gap_is_negative_and_gates_nothing(self) -> None:
+        """D19. Recorded because it is REPORTED, and because a reader who finds
+        a negative number in an artifact should find a test saying so on
+        purpose."""
+        assert COMMISSIONED.separation == pytest.approx(-0.0245, abs=5e-5)
+
+
+class TestOrderingInTheCommissionedBand:
+    """The properties the retrieval evals depend on, on the REAL band.
+
+    Every raw value here is one a `search_query:`/`search_document:` pair of
+    this corpus can actually produce. The band is narrow — bg_p50 0.4930 to
+    same_p50 0.7718 — and that narrowness is the whole reason calibration
+    exists, so asserting these on invented anchors two or three times as wide
+    would prove the arithmetic and not the behaviour.
+    """
+
+    def test_won_and_recent_beats_lost_and_stale_at_equal_relevance(self) -> None:
+        """Preference decides between candidates relevance cannot separate.
+
+        raw 0.7000 -> calibrated 0.7424, comfortably above the 0.5975 floor and
+        identical for both, so nothing but preference is in play.
+        """
+        ranked = rank_measured(
             [
-                candidate(node="lost-stale", vector=0.80, outcome=Outcome.LOST, age_days=900),
-                candidate(node="won-recent", vector=0.80, outcome=Outcome.WON, age_days=30),
+                candidate(node="lost-stale", vector=0.7000, outcome=Outcome.LOST, age_days=900),
+                candidate(node="won-recent", vector=0.7000, outcome=Outcome.WON, age_days=30),
             ]
         )
         assert [c.answer_node_id for c in ranked] == ["won-recent", "lost-stale"]
+        assert ranked[0].relevance == pytest.approx(ranked[1].relevance)
 
     def test_evidence_breaks_a_tie(self) -> None:
-        ranked = rank(
+        """Identical in every other respect, so the bonus is the only difference."""
+        ranked = rank_measured(
             [
-                candidate(node="a-no-evidence", vector=0.7, outcome=Outcome.WON, age_days=100),
+                candidate(node="a-no-evidence", vector=0.6800, outcome=Outcome.WON, age_days=100),
                 candidate(
                     node="b-evidenced",
-                    vector=0.7,
+                    vector=0.6800,
                     outcome=Outcome.WON,
                     age_days=100,
                     evidence=True,
@@ -286,26 +406,218 @@ class TestOrderingProperties:
             ]
         )
         assert ranked[0].answer_node_id == "b-evidenced"
+        assert ranked[0].preference == pytest.approx(ranked[1].preference * EVIDENCE)
 
-    def test_a_much_stronger_similarity_still_wins(self) -> None:
-        """Preference tilts ranking; it must not overturn it outright.
+    def test_a_much_stronger_match_still_wins_despite_every_preference(self) -> None:
+        """Preference tilts ranking; it must not overturn it.
 
-        Both sit inside the calibrated band rather than against its clamps, so
-        this tests the arithmetic and not the clamping:
+            strong-but-lost-and-stale  raw 0.7500 -> calibrated 0.9218
+            weak-but-won-and-evidenced raw 0.6000 -> calibrated 0.3837
 
-            weak-but-won     raw 0.70 -> calibrated 0.3333
-            strong-but-lost  raw 0.82 -> calibrated 0.7333
+        A relevance ratio of 2.40, past every inversion bound, so no combination
+        of outcome, recency and evidence can reorder them.
 
-        The relevance ratio is 2.2, past the 1.733 boundary, so no preference
-        combination can invert them.
+        The weak one is BELOW the 0.5975 floor and does not qualify at all —
+        which, on this band, is unavoidable. See
+        `test_the_achievable_inversion_bound_nearly_covers_the_qualifying_range`:
+        two candidates that both clear the floor can differ by at most 1.6735x,
+        so a ratio wide enough to be preference-proof necessarily puts the
+        weaker one out of the running. Ranking still orders it, because every
+        candidate is returned for the report.
         """
-        ranked = rank(
+        ranked = rank_measured(
             [
-                candidate(node="weak-but-won", vector=0.70, outcome=Outcome.WON, age_days=0),
-                candidate(node="strong-but-lost", vector=0.82, outcome=Outcome.LOST, age_days=0),
+                candidate(
+                    node="weak-but-won",
+                    vector=0.6000,
+                    outcome=Outcome.WON,
+                    age_days=0,
+                    evidence=True,
+                ),
+                candidate(
+                    node="strong-but-lost", vector=0.7500, outcome=Outcome.LOST, age_days=100_000
+                ),
             ]
         )
         assert ranked[0].answer_node_id == "strong-but-lost"
+        assert ranked[0].relevance >= COMMISSIONED.derived_floor
+        assert ranked[1].relevance < COMMISSIONED.derived_floor
+
+    def test_the_configured_clamps_never_actually_bind(self) -> None:
+        """A FINDING, recorded rather than tuned.
+
+        `clamp_min 0.75` / `clamp_max 1.30` are described in scoring.yaml as
+        "belt and braces on the product of outcome x evidence x recency_pref".
+        On the shipped multipliers that product cannot reach either clamp:
+
+            best   won x evidence x recency_pref(0)   = 1.15 * 1.1 * 1.00 = 1.265
+            worst  lost x none x recency_pref(inf)    = 0.85 * 1.0 * 0.90 = 0.765
+
+        So the clamps are inert — correct as a safety bound, and never the thing
+        that decides anything. Worth pinning because the config's stated
+        inversion boundary of 1.733 is derived FROM the clamps, and is therefore
+        a loose upper bound rather than the real one.
+        """
+        best = preference(outcome=Outcome.WON, age_days=0, has_evidence=True)
+        worst = preference(outcome=Outcome.LOST, age_days=100_000, has_evidence=False)
+        assert best == pytest.approx(1.265)
+        assert worst == pytest.approx(0.765)
+        assert best < CONFIG.preference.clamp_max
+        assert worst > CONFIG.preference.clamp_min
+
+    def test_the_preference_inversion_boundary_from_both_sides(self) -> None:
+        """The boundary, both directions, at its ACHIEVABLE value.
+
+            clamp bound       1.30 / 0.75    = 1.7333  (loose; never reached)
+            achievable bound  1.265 / 0.765  = 1.6536  (the real one)
+
+        Tested against the achievable bound, because that is what actually
+        governs. Testing the clamp bound would assert a boundary the code cannot
+        reach and would pass whether or not the real one were correct.
+
+        PAST it, the strongest possible preference cannot rescue the weaker
+        candidate. INSIDE it, that same preference is exactly what decides. One
+        side alone would pass against a bound that was too tight or too loose.
+        """
+        best = preference(outcome=Outcome.WON, age_days=0, has_evidence=True)
+        worst = preference(outcome=Outcome.LOST, age_days=100_000, has_evidence=False)
+        boundary = best / worst
+        assert boundary == pytest.approx(1.653595, abs=1e-6)
+        assert boundary < CONFIG.preference.clamp_max / CONFIG.preference.clamp_min
+
+        strong = COMMISSIONED.calibrated(0.7500)
+
+        def contest(weak_relevance: float) -> list[ScoredCandidate]:
+            return rank_measured(
+                [
+                    candidate(
+                        node="weak-won-evidenced",
+                        vector=raw_for(weak_relevance),
+                        outcome=Outcome.WON,
+                        age_days=0,
+                        evidence=True,
+                    ),
+                    candidate(
+                        node="strong-lost-stale",
+                        vector=0.7500,
+                        outcome=Outcome.LOST,
+                        age_days=100_000,
+                    ),
+                ]
+            )
+
+        assert contest(strong / (boundary * 1.01))[0].answer_node_id == "strong-lost-stale"
+        assert contest(strong / (boundary * 0.99))[0].answer_node_id == "weak-won-evidenced"
+
+    def test_the_achievable_inversion_bound_nearly_covers_the_qualifying_range(self) -> None:
+        """A FINDING about D17's design, on this band. Recorded, not tuned.
+
+        D17 split relevance from preference so that preference could reorder
+        comparable candidates without overturning relevance. How much of the
+        QUALIFYING range that leaves preference in charge of is a property of
+        the floor, and nobody chose it — it fell out of the calibration:
+
+            widest ratio between two candidates that BOTH clear the floor
+                1.0 / 0.5975 = 1.6735
+            widest ratio preference can invert
+                1.265 / 0.765 = 1.6536
+
+        So preference can reorder almost every qualifying pair, and the region
+        it cannot reach is the sliver between 1.6536 and 1.6735 — pairs where
+        one candidate is essentially a perfect match and the other sits within a
+        whisker of the floor.
+
+        That is not obviously wrong: those two are genuinely far apart. But it
+        does mean the 1.733 figure in scoring.yaml overstates how protected
+        relevance is, and that the protection is narrow by arithmetic rather
+        than by intent. Flagged for review; no constant moved.
+        """
+        best = preference(outcome=Outcome.WON, age_days=0, has_evidence=True)
+        worst = preference(outcome=Outcome.LOST, age_days=100_000, has_evidence=False)
+        widest_qualifying = 1.0 / COMMISSIONED.derived_floor
+
+        assert widest_qualifying == pytest.approx(1.673544, abs=1e-6)
+        assert best / worst == pytest.approx(1.653595, abs=1e-6)
+        # The sliver exists, and is small.
+        assert best / worst < widest_qualifying
+        assert widest_qualifying - best / worst == pytest.approx(0.0199, abs=1e-3)
+
+    def test_the_full_chain_hand_computed_on_the_measured_anchors(self) -> None:
+        """raw -> calibrated -> relevance -> preference -> final, real anchors.
+
+        span         same_p50 0.7718081878 - bg_p50 0.4930148972 = 0.2787932906
+        raw          0.7000
+        calibrated   (0.7000 - 0.4930148972) / 0.2787932906     = 0.742432
+        relevance    0.5 * 0.742432 + 0.5 * 0.60                = 0.671216
+        preference   1.15 * 1.1 * (0.90 + 0.10 * e^(-30/540))
+                     = 1.265 * 0.9945959                        = 1.258164
+        final        0.671216 * 1.258164                        = 0.844500
+        """
+        only = rank_measured(
+            [candidate(node="a", vector=0.7000, outcome=Outcome.WON, age_days=30, evidence=True)],
+            rerank_scores={0: 0.60},
+        )[0]
+        assert only.calibrated_similarity == pytest.approx(0.742432, abs=1e-6)
+        assert only.relevance == pytest.approx(0.671216, abs=1e-6)
+        assert only.preference == pytest.approx(1.258164, abs=1e-6)
+        assert only.final_score == pytest.approx(0.844500, abs=1e-6)
+
+
+class TestFloorBoundaryExactness:
+    """The floor is `relevance >= floor`, and the boundary is exact.
+
+    An off-by-one-ULP here is not academic: it decides MATCHED against NO_MATCH
+    for a candidate sitting on the line, and NO_MATCH is what obliges the
+    drafter to escalate.
+    """
+
+    def test_relevance_exactly_at_the_floor_matches(self) -> None:
+        """`>=`, not `>`. Constructed by overriding the floor to the candidate's
+        own relevance, which is exact — unlike inverting the mapping."""
+        scored = rank_measured([candidate(node="a", vector=0.6600)])
+        result = to_retrieval_result(
+            "q-1", scored, calibration=COMMISSIONED, floor_override=scored[0].relevance
+        )
+        assert result.status is RetrievalStatus.MATCHED
+        assert result.floor_used == scored[0].relevance
+
+    def test_one_ulp_above_the_relevance_does_not_match(self) -> None:
+        scored = rank_measured([candidate(node="a", vector=0.6600)])
+        just_above = math.nextafter(scored[0].relevance, 1.0)
+        result = to_retrieval_result(
+            "q-1", scored, calibration=COMMISSIONED, floor_override=just_above
+        )
+        assert result.status is RetrievalStatus.NO_MATCH
+
+    def test_the_floor_actually_applied_is_the_commissioned_one(self) -> None:
+        scored = rank_measured([candidate(node="a", vector=0.7000)])
+        result = to_retrieval_result("q-1", scored, calibration=COMMISSIONED)
+        assert result.floor_used == COMMISSIONED.derived_floor
+        assert result.floor_used == pytest.approx(0.5975, abs=5e-5)
+        assert result.status is RetrievalStatus.MATCHED
+
+    def test_a_candidate_below_the_commissioned_floor_is_no_match(self) -> None:
+        """raw 0.6400 -> calibrated 0.5272, under the 0.5975 floor."""
+        scored = rank_measured(
+            [candidate(node="a", vector=0.6400, outcome=Outcome.WON, age_days=0, evidence=True)]
+        )
+        assert scored[0].relevance < COMMISSIONED.derived_floor
+        result = to_retrieval_result("q-1", scored, calibration=COMMISSIONED)
+        assert result.status is RetrievalStatus.NO_MATCH
+
+    def test_inverting_the_mapping_is_accurate_to_one_ulp_and_no_better(self) -> None:
+        """Why the exactness tests above override the floor instead of inverting.
+
+        `bg_p50 + floor * span` does NOT round-trip to `floor` — it lands one ULP
+        low, so a candidate built that way is BELOW its own floor. That is a
+        property of binary floating point, not a scoring bug, and it is pinned
+        here so nobody 'fixes' the boundary tests by inverting the map and then
+        chases the resulting off-by-one.
+        """
+        round_tripped = COMMISSIONED.calibrated(raw_for(COMMISSIONED.derived_floor))
+        assert round_tripped != COMMISSIONED.derived_floor
+        assert round_tripped == pytest.approx(COMMISSIONED.derived_floor, abs=1e-15)
+        assert math.nextafter(round_tripped, 1.0) == COMMISSIONED.derived_floor
 
     def test_identical_candidates_break_ties_deterministically(self) -> None:
         """Otherwise the ranking depends on database return order."""
