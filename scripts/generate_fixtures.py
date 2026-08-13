@@ -46,6 +46,7 @@ from scripts.fixtures.corpus import (
     Topic,
     family_of,
 )
+from src.retrieval.calibration import BAITS, UNANSWERABLE
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 FIXTURES = REPO_ROOT / "fixtures"
@@ -617,21 +618,101 @@ def build_answer_key(pairs: list[dict[str, Any]], source: dict[str, Any]) -> dic
 # ---------------------------------------------------------------------------
 
 
+#: Weight of the family anchor in the CI stand-in embedder (amendment N).
+#:
+#: Lives here, with the lookup it is used against, because the two are one
+#: artifact: the anchors are only meaningful for texts the lookup can place, and
+#: a weight stored apart from the mapping could drift out of step with it.
+#:
+#: 0.7 puts the family signal firmly in charge while leaving the token bag enough
+#: room to keep same-family texts distinguishable from one another. It is a CI
+#: knob and nothing else — no production path reads it.
+FAMILY_ANCHOR_WEIGHT = 0.7
+
+
+def normalize_question(text: str) -> str:
+    """Whitespace-collapsed lookup key, matching `normalized_question`."""
+    return " ".join(text.split())
+
+
+def generate_family_lookup(
+    pairs: list[dict[str, Any]], paraphrases: list[dict[str, Any]]
+) -> dict[str, Any]:
+    """Question text -> topic family, for the CI stand-in embedder (amendment N).
+
+    GENERATED WITH THE FIXTURES ON PURPOSE. The stand-in blends a per-family
+    anchor into each vector so that CI's calibration has real separation to
+    measure; that only works if every text the corpus contains can be placed in
+    its family. Generating the mapping here means a corpus change carries its
+    lookup with it, and `--check` fails if the committed copy has drifted.
+
+    Three populations, and the third is defined by ABSENCE:
+
+      originals + paraphrases  their own `topic_family`.
+      golden answerables       the family of the answer the key expects, so a
+                               golden question lands on its own subject.
+      unanswerables and baits  ABSENT. No family, so they embed as a pure token
+                               bag, which sits far from every anchor. That makes
+                               NO_MATCH a structural property of CI's geometry
+                               rather than something the fixture asserts.
+
+    The golden texts come from the hand-written key, which is read and never
+    written: it is independent ground truth (D16) and this is a consumer of it.
+    """
+    family_by_answer = {pair["answer_id"]: pair["topic_family"] for pair in pairs}
+
+    entries: dict[str, str] = {}
+    for row in [*pairs, *paraphrases]:
+        key = normalize_question(row["question"])
+        existing = entries.get(key)
+        if existing is not None and existing != row["topic_family"]:
+            raise ValueError(
+                f"question text maps to two families ({existing} and {row['topic_family']}): "
+                f"{key!r}. The anchor for that text would be ambiguous."
+            )
+        entries[key] = row["topic_family"]
+
+    with (FIXTURES / "answer_key_manual.json").open(encoding="utf-8") as handle:
+        manual = json.load(handle)
+
+    for question in manual["questions"]:
+        number = question["number"]
+        if number in UNANSWERABLE or number in BAITS:
+            continue
+        answer_id = question["expected_best_match_answer_id"]
+        if not answer_id:
+            continue
+        if answer_id not in family_by_answer:
+            raise ValueError(
+                f"golden question {number} expects {answer_id}, which no corpus pair owns"
+            )
+        entries[normalize_question(question["text"])] = family_by_answer[answer_id]
+
+    return {
+        "version": 1,
+        "config": {"family_anchor_weight": FAMILY_ANCHOR_WEIGHT},
+        "families": dict(sorted(entries.items())),
+    }
+
+
 def generate(root: Path) -> dict[str, Any]:
     generate_registry(root)
     pairs = generate_qa_pairs()
     source = golden_source()
+    paraphrases = generate_paraphrases(pairs)
 
     write_json(root / "qa_pairs.json", pairs)
-    write_json(root / "question_paraphrases.json", generate_paraphrases(pairs))
+    write_json(root / "question_paraphrases.json", paraphrases)
     write_json(root / "golden_rfp_source.json", source)
     write_json(root / "answer_key.json", build_answer_key(pairs, source))
+    write_json(root / "fake_embedder_families.json", generate_family_lookup(pairs, paraphrases))
 
     render_docx(source, root / "golden_rfp.docx")
     render_pdf(source, root / "golden_rfp.pdf")
     render_response_template(root / "templates" / "response_template.docx")
 
     return {
+        "family_lookup_entries": len(generate_family_lookup(pairs, paraphrases)["families"]),
         "pairs": len(pairs),
         "outcomes": dict(Counter(p["outcome"] for p in pairs)),
         "types": dict(Counter(p["question_type"] for p in pairs)),
@@ -648,6 +729,7 @@ def check() -> int:
         "question_paraphrases.json",
         "golden_rfp_source.json",
         "answer_key.json",
+        "fake_embedder_families.json",
         "registry/vendors.csv",
         "registry/products.csv",
         "registry/certifications.csv",

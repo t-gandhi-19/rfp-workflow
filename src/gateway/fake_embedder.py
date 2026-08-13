@@ -3,39 +3,59 @@
 CI has no Ollama (CLAUDE.md rule 26), but ingest, the vector index and — since
 amendment K — calibration all need vectors. This produces them without a model.
 
-**It is a bag-of-words scheme, not a hash of the whole string.** Each token is
-hashed to its own seeded unit vector; a text's embedding is the normalised sum
-of its tokens'. That gives the one property the previous version could not have:
-texts that share vocabulary land near each other, and texts that do not land
-near orthogonal. Two paraphrases of the same question score high, two questions
-about different subjects score low, and the resulting distribution has a real
-shape rather than a uniform one.
+THE EPISTEMIC SPLIT. State it before anything else, because everything below
+depends on it:
 
-That matters because the old scheme — one hash per whole text — made every pair
-of distinct strings equidistant. Calibration measured over it would have found no
-separation whatever between "the same question" and "an unrelated question".
+    CI proves the calibration and retrieval MACHINERY end to end.
+    The real-model run quoted in every PR proves the SEMANTICS.
 
-**It is still not enough to calibrate the shipped corpus, and that is a finding
-rather than a defect.** Measured over the 112 corpus questions, this scheme puts
-the same-subject p05 at 0.2254 and the background p99 at 0.2841 — a separation of
--0.0587, so `make calibrate` refuses. Three rounds of improvement (stopwords,
-stemming, paraphrases that retain domain vocabulary) moved that from -0.4217 to
--0.0587 without closing it.
+Neither substitutes for the other. A green CI says the guards compute, gate and
+refuse correctly on vectors whose geometry is known by construction. It says
+nothing whatever about whether retrieval finds the right answer, because these
+vectors carry no meaning. That question is settled only by the zero-tolerance
+retrieval evals on real embeddings, and no CI result may ever be quoted in their
+place.
 
-The reason is structural. Every question in this corpus is about cloud migration,
-so cross-subject pairs legitimately share vocabulary — "migration", "model",
-"data", "programme". Distinguishing "the same question, reworded" from "a
-different question about a neighbouring topic" on shared vocabulary alone is
-exactly the judgement that requires semantics, which is what the real model is
-for. A lexical stand-in comparing the 12th-worst match against the 122nd-best
-non-match cannot make it. Loosening the guard to hide this would be measuring CI
-rather than the corpus.
+**The scheme (v3, amendment N).** Each vector blends two parts:
 
-What this does NOT claim: anything about retrieval quality. The geometry is real,
-the semantics are not — "downtime" and "outage" are as unrelated here as any two
-words, where a real model knows better. Retrieval quality is measured against
-real embeddings, and any eval depending on semantic similarity must not run
-against this.
+    embedding(text) = normalize(a * family_anchor(family(text))
+                                + (1 - a) * token_bag(text))
+
+* **token_bag** — the v2 scheme, unchanged. Each token is hashed to its own
+  seeded unit vector and the text's is the normalised sum, so texts sharing
+  vocabulary land near each other.
+* **family_anchor** — a seeded unit vector per `topic_family`, looked up from a
+  committed mapping generated with the fixtures. Texts about the same subject
+  share it; texts about different subjects get near-orthogonal ones.
+* **a** — the anchor's weight, carried in the same generated artifact.
+
+A text the lookup cannot place gets a PURE TOKEN BAG. That is not a fallback, it
+is the mechanism: the three unanswerable golden questions and the two baits are
+deliberately absent from the mapping, so they sit far from every anchor and land
+below the floor. NO_MATCH works in CI by construction rather than by assertion.
+
+**Why v2 was not enough, and why this is not cheating.** v2 could not calibrate
+the shipped corpus at all: same-subject p05 0.2254 against background p99 0.2841,
+a separation of -0.0587, so `make calibrate` refused and the D18/D19 gates could
+only be skipped in CI — the guards went untested precisely where testing is
+cheapest. Three rounds of lexical improvement (stopwords, stemming, paraphrases
+retaining domain vocabulary) moved that from -0.4217 to -0.0587 without closing
+it, and the reason is structural: every question here is about cloud migration,
+so cross-subject pairs legitimately share vocabulary. Telling "the same question,
+reworded" from "a different question about a neighbouring topic" on shared
+vocabulary alone is exactly the judgement that needs semantics.
+
+So v3 stops trying to DERIVE the subject and is TOLD it. That is honest for what
+this is for — exercising machinery — and it is why the split above is stated
+first. The anchor is not a model that learned the corpus; it is a label the
+fixtures already contain, injected so the geometry has the shape a real embedder
+would produce. Making CI's numbers good is not evidence that retrieval is good,
+and the guard values CI commissions are its own and never the shipped ones.
+
+What this still does NOT claim: anything about retrieval quality. Within a
+family the geometry remains purely lexical — "downtime" and "outage" are as
+unrelated here as any two words. Any eval depending on semantic similarity must
+not run against this.
 
 Enabling it takes an explicit opt-in (`RFP_FAKE_EMBEDDINGS=1`). It is off by
 default, `make ingest` never sets it, and a test asserts both.
@@ -43,10 +63,14 @@ default, `make ingest` never sets it, and a test asserts both.
 
 from __future__ import annotations
 
+import functools
 import hashlib
+import json
 import math
 import os
 import re
+from pathlib import Path
+from typing import Any
 
 from src.contracts.embedding import EmbedRole, strip_task_prefix
 
@@ -59,6 +83,15 @@ _TOKEN = re.compile(r"[a-z0-9]+(?:'[a-z]+)?")
 #: Mixed into every token hash, so these vectors cannot be confused with any
 #: other hash-derived vector in the codebase.
 _SALT = "rfp-fake-embedder-v2"
+
+#: A DIFFERENT salt for family anchors, so an anchor can never collide with the
+#: token vector of a word that happens to be spelled like a family name.
+_ANCHOR_SALT = "rfp-fake-embedder-v3-anchor"
+
+#: Generated with the fixtures by `scripts/generate_fixtures.py`.
+FAMILY_LOOKUP_PATH = (
+    Path(__file__).resolve().parents[2] / "fixtures" / "fake_embedder_families.json"
+)
 
 #: Function words and RFP boilerplate verbs, dropped before hashing.
 #:
@@ -198,18 +231,23 @@ def tokenize(text: str) -> list[str]:
     return [stem(token) for token in (content or tokens)]
 
 
-def _token_vector(token: str, dimensions: int) -> list[float]:
-    """A stable pseudo-random unit vector for one token.
+def _seeded_unit_vector(salt: str, name: str, dimensions: int) -> list[float]:
+    """A stable pseudo-random unit vector for one salted name.
 
     Hashed with a counter until enough bytes exist, so the result depends only
-    on the token and the width — not on Python's hash seed, the platform, or the
-    order things were embedded in.
+    on the salt, the name and the width — not on Python's hash seed, the
+    platform, or the order things were embedded in.
+
+    The seed layout is `salt:counter:name`, which is v2's exactly. Amendment N
+    added the family anchor on top of the token bag and did NOT change the bag,
+    so every token vector this produces is byte-identical to the one v2
+    produced; only the salt distinguishes an anchor from a token.
     """
     needed = dimensions * 2
     material = bytearray()
     counter = 0
     while len(material) < needed:
-        material.extend(hashlib.sha256(f"{_SALT}:{counter}:{token}".encode()).digest())
+        material.extend(hashlib.sha256(f"{salt}:{counter}:{name}".encode()).digest())
         counter += 1
 
     values = [
@@ -222,8 +260,90 @@ def _token_vector(token: str, dimensions: int) -> list[float]:
     return [value / norm for value in values]
 
 
-def fake_embedding(text: str, dimensions: int, *, role: EmbedRole) -> list[float]:
-    """A stable unit vector for `text`, built from its tokens.
+def _token_vector(token: str, dimensions: int) -> list[float]:
+    """A stable pseudo-random unit vector for one token."""
+    return _seeded_unit_vector(_SALT, token, dimensions)
+
+
+@functools.lru_cache(maxsize=1)
+def _lookup() -> dict[str, Any]:
+    """The committed family mapping, read once.
+
+    Loaded lazily rather than at import, so merely importing this module in a
+    production process touches no fixture file.
+    """
+    if not FAMILY_LOOKUP_PATH.is_file():
+        raise FileNotFoundError(
+            f"the stand-in embedder's family lookup is missing at {FAMILY_LOOKUP_PATH}. "
+            "It is generated with the fixtures. Run: make fixtures"
+        )
+    with FAMILY_LOOKUP_PATH.open(encoding="utf-8") as handle:
+        data: dict[str, Any] = json.load(handle)
+    return data
+
+
+def family_anchor_weight() -> float:
+    """The blend weight, from the generated artifact."""
+    weight = float(_lookup()["config"]["family_anchor_weight"])
+    if not 0.0 <= weight <= 1.0:
+        raise ValueError(f"family_anchor_weight must be in [0, 1], got {weight}")
+    return weight
+
+
+def family_of(text: str) -> str | None:
+    """The topic family of `text`, or None if the corpus does not place it.
+
+    None is MEANINGFUL, not an error. The unanswerable golden questions and the
+    two baits are deliberately absent, so they embed as a pure token bag and sit
+    far from every anchor.
+
+    Whitespace is collapsed before lookup, matching how the mapping is keyed —
+    the same text re-wrapped across lines must not become a different question.
+    """
+    families: dict[str, str] = _lookup()["families"]
+    return families.get(" ".join(text.split()))
+
+
+def _anchor_vector(family: str, dimensions: int) -> list[float]:
+    """A stable pseudo-random unit vector for one topic family.
+
+    Same construction as a token vector under a different salt: two families are
+    near-orthogonal in high dimensions, which is exactly the relation two
+    unrelated subjects should have.
+    """
+    return _seeded_unit_vector(_ANCHOR_SALT, family, dimensions)
+
+
+def _normalized(values: list[float], dimensions: int) -> list[float]:
+    """Scale to unit length, with a valid fallback for a zero vector.
+
+    The index rejects a zero vector, and raising here would make ingest fail on
+    a blank field rather than store a harmless one.
+    """
+    norm = math.sqrt(sum(value * value for value in values))
+    if norm == 0:  # pragma: no cover - requires exactly cancelling components
+        return [1.0] + [0.0] * (dimensions - 1)
+    return [value / norm for value in values]
+
+
+def token_bag(text: str, dimensions: int) -> list[float]:
+    """The v2 scheme, unchanged: the normalised sum of the tokens' vectors."""
+    tokens = tokenize(text)
+    if not tokens:
+        return [1.0] + [0.0] * (dimensions - 1)
+
+    summed = [0.0] * dimensions
+    for token in tokens:
+        vector = _token_vector(token, dimensions)
+        for index in range(dimensions):
+            summed[index] += vector[index]
+    return _normalized(summed, dimensions)
+
+
+def fake_embedding(
+    text: str, dimensions: int, *, role: EmbedRole, alpha: float | None = None
+) -> list[float]:
+    """A stable unit vector for `text`: its family anchor blended with its tokens.
 
     `role` is required and unused, on purpose. The real embedder's `role` has no
     default because embedding a query as a document produces a plausible vector
@@ -235,29 +355,36 @@ def fake_embedding(text: str, dimensions: int, *, role: EmbedRole) -> list[float
     model's role split, a CI query would never match its own corpus entry and
     the vector-index tests would assert nothing. Stripping makes the same text
     embed identically from either side, which keeps CI a clean plumbing oracle
-    and keeps the calibration geometry symmetric — cross-prefix scores in CI
-    measure the token overlap and nothing else.
+    and keeps the calibration geometry symmetric.
+
+    `alpha` overrides the artifact's weight. It exists so tests can pin the two
+    ends of the blend — 0.0 is exactly v2, 1.0 is the anchor alone — and no
+    caller in the pipeline passes it.
+
+    A text with no family is a pure token bag. That is the mechanism the
+    unanswerable probes rely on, not a degraded mode.
     """
     if dimensions <= 0:
         raise ValueError("dimensions must be positive")
 
-    tokens = tokenize(strip_task_prefix(text))
-    if not tokens:
-        # An empty text still needs a valid unit vector; the index rejects a zero
-        # one and a raise here would make ingest fail on a blank field.
-        return [1.0] + [0.0] * (dimensions - 1)
+    stripped = strip_task_prefix(text)
+    bag = token_bag(stripped, dimensions)
 
-    summed = [0.0] * dimensions
-    for token in tokens:
-        vector = _token_vector(token, dimensions)
-        for index in range(dimensions):
-            summed[index] += vector[index]
+    family = family_of(stripped)
+    if family is None:
+        return bag
 
-    norm = math.sqrt(sum(value * value for value in summed))
-    if norm == 0:  # pragma: no cover - requires exactly cancelling tokens
-        return [1.0] + [0.0] * (dimensions - 1)
-    return [value / norm for value in summed]
+    weight = family_anchor_weight() if alpha is None else alpha
+    if not 0.0 <= weight <= 1.0:
+        raise ValueError(f"alpha must be in [0, 1], got {weight}")
+
+    anchor = _anchor_vector(family, dimensions)
+    blended = [weight * anchor[i] + (1.0 - weight) * bag[i] for i in range(dimensions)]
+    return _normalized(blended, dimensions)
 
 
-def fake_embeddings(texts: list[str], dimensions: int, *, role: EmbedRole) -> list[list[float]]:
-    return [fake_embedding(text, dimensions, role=role) for text in texts]
+def fake_embeddings(
+    texts: list[str], dimensions: int, *, role: EmbedRole, alpha: float | None = None
+) -> list[list[float]]:
+    """Order-independent: each text is embedded from itself alone."""
+    return [fake_embedding(text, dimensions, role=role, alpha=alpha) for text in texts]

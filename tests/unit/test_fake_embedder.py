@@ -12,21 +12,63 @@ calibration artifact and exercise the separation guard rather than skipping it.
 
 from __future__ import annotations
 
+import json
 import math
+from pathlib import Path
+from typing import Any
 
 import pytest
 
 from src.contracts.embedding import EmbedRole
 from src.gateway.fake_embedder import (
     FAKE_EMBEDDINGS_ENV,
+    FAMILY_LOOKUP_PATH,
+    _anchor_vector,
     fake_embedding,
     fake_embeddings,
     fake_embeddings_enabled,
+    family_anchor_weight,
+    family_of,
     stem,
+    token_bag,
     tokenize,
 )
 
 DIMENSIONS = 768
+REPO_ROOT = Path(__file__).resolve().parents[2]
+FIXTURES = REPO_ROOT / "fixtures"
+
+
+def _read(name: str) -> Any:
+    with (FIXTURES / name).open(encoding="utf-8") as handle:
+        return json.load(handle)
+
+
+QA_PAIRS: list[dict[str, Any]] = _read("qa_pairs.json")
+PARAPHRASE_ROWS: list[dict[str, Any]] = _read("question_paraphrases.json")
+GOLDEN_QUESTIONS: list[dict[str, Any]] = _read("answer_key_manual.json")["questions"]
+
+
+def load_family_lookup() -> dict[str, Any]:
+    with FAMILY_LOOKUP_PATH.open(encoding="utf-8") as handle:
+        data: dict[str, Any] = json.load(handle)
+    return data
+
+
+def golden_text(number: str) -> str:
+    return str(next(q for q in GOLDEN_QUESTIONS if q["number"] == number)["text"])
+
+
+def same_family_pair() -> tuple[str, str]:
+    """A paraphrase and the question it rewords — different texts, one subject."""
+    row = PARAPHRASE_ROWS[0]
+    original = next(p for p in QA_PAIRS if p["question_id"] == row["paraphrase_of"])
+    return str(original["question"]), str(row["question"])
+
+
+def other_family_question() -> str:
+    family = PARAPHRASE_ROWS[0]["topic_family"]
+    return str(next(p for p in QA_PAIRS if p["topic_family"] != family)["question"])
 
 
 def embed(text: str, *, role: EmbedRole = EmbedRole.DOCUMENT) -> list[float]:
@@ -240,3 +282,176 @@ class TestGeometryIsReal:
         no eval depending on semantic similarity may run against it.
         """
         assert cosine(embed("downtime"), embed("outage")) < 0.3
+
+
+class TestFamilyLookup:
+    """Amendment N. The mapping is generated with the fixtures, so it is covered
+    by `make fixtures-check` byte-determinism; these assert its CONTENT."""
+
+    def test_every_corpus_original_is_placed(self) -> None:
+        for pair in QA_PAIRS:
+            assert family_of(pair["question"]) == pair["topic_family"], pair["id"]
+
+    def test_every_paraphrase_is_placed_in_its_original_s_family(self) -> None:
+        """The property the same-subject anchor depends on: a paraphrase and the
+        question it rewords must land on the SAME anchor, or the pair the
+        calibration calls 'genuinely the same question' would not be."""
+        for row in PARAPHRASE_ROWS:
+            assert family_of(row["question"]) == row["topic_family"], row["id"]
+
+    def test_the_lookup_covers_exactly_the_expected_population(self) -> None:
+        """36 distinct original texts (4 supersession chains share theirs
+        byte-for-byte), 108 paraphrases, 15 answerable golden questions."""
+        assert len(load_family_lookup()["families"]) == 36 + 108 + 15
+
+    @pytest.mark.parametrize("number", ["2.7", "2.8", "3.5"])
+    def test_the_unanswerables_carry_no_family(self, number: str) -> None:
+        """ABSENCE IS THE MECHANISM, not an oversight.
+
+        A question the corpus cannot answer embeds as a pure token bag, which
+        sits far from every anchor — so it lands below the floor by construction
+        rather than because a fixture says so.
+        """
+        assert family_of(golden_text(number)) is None
+
+    @pytest.mark.parametrize("number", ["3.4", "4.2"])
+    def test_the_baits_carry_no_family(self, number: str) -> None:
+        assert family_of(golden_text(number)) is None
+
+    def test_answerable_golden_questions_are_placed_on_their_subject(self) -> None:
+        family_by_answer = {pair["answer_id"]: pair["topic_family"] for pair in QA_PAIRS}
+        placed = 0
+        for question in GOLDEN_QUESTIONS:
+            if question["number"] in {"2.7", "2.8", "3.5", "3.4", "4.2"}:
+                continue
+            expected = family_by_answer[question["expected_best_match_answer_id"]]
+            assert family_of(question["text"]) == expected, question["number"]
+            placed += 1
+        assert placed == 15
+
+    def test_whitespace_is_collapsed_before_lookup(self) -> None:
+        """A text re-wrapped across lines is the same question."""
+        original = QA_PAIRS[0]["question"]
+        rewrapped = original.replace(" ", "\n   ", 1)
+        assert family_of(rewrapped) == family_of(original)
+
+    def test_an_unknown_text_has_no_family(self) -> None:
+        assert family_of("a question about nothing in this corpus at all") is None
+
+
+class TestFamilyAnchoredGeometry:
+    """What amendment N exists to create: separation CI can actually calibrate.
+
+    v2 could not. Measured over this corpus it put the same-subject p05 at
+    0.2254 under a background p99 of 0.2841 — a separation of -0.0587 — so
+    `make calibrate` refused and the D18/D19 gates could only be SKIPPED in CI,
+    leaving the guards untested exactly where testing is cheapest.
+    """
+
+    def test_same_family_texts_score_far_above_cross_family_ones(self) -> None:
+        first, second = same_family_pair()
+        other = other_family_question()
+        assert cosine(embed(first), embed(second)) > 0.8
+        assert cosine(embed(first), embed(other)) < 0.3
+
+    def test_a_paraphrase_lands_near_the_question_it_rewords(self) -> None:
+        row = PARAPHRASE_ROWS[0]
+        original = next(p for p in QA_PAIRS if p["question_id"] == row["paraphrase_of"])
+        assert cosine(embed(row["question"]), embed(original["question"])) > 0.8
+
+    def test_an_unanswerable_question_sits_far_from_every_anchor(self) -> None:
+        """The NO_MATCH property, stated directly against the corpus."""
+        unanswerable = embed(golden_text("2.7"))
+        best = max(cosine(unanswerable, embed(pair["question"])) for pair in QA_PAIRS)
+        assert best < 0.4
+
+    def test_two_families_are_near_orthogonal(self) -> None:
+        first = _anchor_vector("landing-zone", DIMENSIONS)
+        second = _anchor_vector("data-migration", DIMENSIONS)
+        assert abs(cosine(first, second)) < 0.15
+
+
+class TestBlend:
+    """The two ends of the blend, pinned."""
+
+    def test_alpha_zero_is_exactly_the_v2_token_bag(self) -> None:
+        text = QA_PAIRS[0]["question"]
+        assert fake_embedding(
+            text, DIMENSIONS, role=EmbedRole.DOCUMENT, alpha=0.0
+        ) == pytest.approx(token_bag(text, DIMENSIONS))
+
+    def test_alpha_one_is_the_anchor_alone(self) -> None:
+        pair = QA_PAIRS[0]
+        blended = fake_embedding(pair["question"], DIMENSIONS, role=EmbedRole.QUERY, alpha=1.0)
+        assert blended == pytest.approx(_anchor_vector(pair["topic_family"], DIMENSIONS))
+
+    def test_the_default_weight_comes_from_the_generated_artifact(self) -> None:
+        assert family_anchor_weight() == load_family_lookup()["config"]["family_anchor_weight"]
+        assert 0.0 <= family_anchor_weight() <= 1.0
+
+    def test_an_out_of_range_alpha_is_refused(self) -> None:
+        with pytest.raises(ValueError, match="alpha"):
+            fake_embedding(QA_PAIRS[0]["question"], DIMENSIONS, role=EmbedRole.QUERY, alpha=1.5)
+
+    def test_alpha_does_nothing_for_a_text_with_no_family(self) -> None:
+        """No anchor to weight, so the blend is not reachable at all."""
+        text = golden_text("3.5")
+        for alpha in (0.0, 0.5, 1.0):
+            assert fake_embedding(text, DIMENSIONS, role=EmbedRole.QUERY, alpha=alpha) == (
+                token_bag(text, DIMENSIONS)
+            )
+
+    def test_within_a_family_the_texts_stay_distinguishable(self) -> None:
+        """The anchor must not swamp the bag entirely.
+
+        If it did, every text in a family would be the same vector and the
+        same-subject distribution would be a spike at 1.0 — which would make the
+        calibration statistics describe the anchor rather than the corpus.
+        """
+        first, second = same_family_pair()
+        assert cosine(embed(first), embed(second)) < 0.999
+
+    def test_blending_preserves_determinism_and_order_independence(self) -> None:
+        texts = [pair["question"] for pair in QA_PAIRS[:5]]
+        batch = fake_embeddings(texts, DIMENSIONS, role=EmbedRole.DOCUMENT)
+        assert batch == [embed(text) for text in texts]
+        assert fake_embeddings(list(reversed(texts)), DIMENSIONS, role=EmbedRole.DOCUMENT) == list(
+            reversed(batch)
+        )
+
+
+class TestCannotBeEnabledOutsideTestConfig:
+    """A stand-in reachable from a production run would produce vectors that
+    look fine, index fine, and mean nothing."""
+
+    def test_the_gateway_never_imports_the_stand_in(self) -> None:
+        """`GatewayClient` is the production embedding path.
+
+        Only the two CI-aware entry points (ingest and calibrate) consult the
+        opt-in; the client itself must have no knowledge of it, or a code path
+        could reach it without the environment being checked.
+        """
+        source = (REPO_ROOT / "src" / "gateway" / "client.py").read_text(encoding="utf-8")
+        assert "fake_embedder" not in source
+        assert FAKE_EMBEDDINGS_ENV not in source
+
+    def test_every_call_site_is_guarded_by_the_opt_in(self) -> None:
+        callers = sorted(
+            path
+            for path in (REPO_ROOT / "src").rglob("*.py")
+            if "fake_embeddings(" in path.read_text(encoding="utf-8")
+            and path.name != "fake_embedder.py"
+        ) + sorted(
+            path
+            for path in (REPO_ROOT / "scripts").rglob("*.py")
+            if "fake_embeddings(" in path.read_text(encoding="utf-8")
+        )
+        assert callers, "expected at least one caller; the search is probably wrong"
+        for path in callers:
+            source = path.read_text(encoding="utf-8")
+            assert "fake_embeddings_enabled()" in source, path
+
+    def test_the_lookup_lives_in_fixtures_not_config(self) -> None:
+        """It is test data, and its location says so."""
+        assert FAMILY_LOOKUP_PATH.parent.name == "fixtures"
+        assert not (REPO_ROOT / "config" / "fake_embedder_families.json").exists()

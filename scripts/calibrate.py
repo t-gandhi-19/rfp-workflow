@@ -60,6 +60,25 @@ BATCH = 16
 
 CONFIG_PATH = config_dir() / "scoring.yaml"
 
+#: The COMMITTED config, regardless of where `RFP_CONFIG_DIR` currently points.
+#:
+#: The stand-in refusal below is expressed against this rather than against the
+#: embedder alone. What the refusal protects is the shipped constants: baselines
+#: in the repo's scoring.yaml defend the model production uses, and a stand-in's
+#: margins are not evidence about it. Redirected to a scratch copy, commissioning
+#: from the stand-in moves nothing that ships and is exactly what CI needs to
+#: judge its own run against its own numbers.
+REPO_CONFIG_PATH = Path(__file__).resolve().parents[1] / "config" / "scoring.yaml"
+
+
+def commissioning_would_move_shipped_guards(config_path: Path) -> bool:
+    """Would a commissioning run rewrite the COMMITTED baselines?
+
+    The one question the stand-in refusal turns on, isolated so it can be tested
+    without embedding a corpus.
+    """
+    return config_path.resolve() == REPO_CONFIG_PATH.resolve()
+
 
 async def _embed(texts: list[str], role: EmbedRole) -> list[list[float]]:
     """Embed one side of the geometry, through the gateway or the CI stand-in."""
@@ -442,10 +461,14 @@ async def run(*, dry_run: bool, skip_persist: bool, commissioning: bool) -> int:
     landings = await land_probes(artifact)
 
     if commissioning:
-        if fake_embeddings_enabled():
+        if fake_embeddings_enabled() and commissioning_would_move_shipped_guards(CONFIG_PATH):
             raise CalibrationError(
-                "refusing to commission the guards against the stand-in embedder. The "
-                "baselines they defend have to come from the model production actually uses."
+                "refusing to commission the SHIPPED guards against the stand-in embedder. "
+                "The baselines in config/scoring.yaml defend the model production actually "
+                "uses, and stand-in margins are not evidence about it.\n"
+                "To commission CI's own baselines instead, point RFP_CONFIG_DIR at a copy "
+                "of config/ outside the repo: nothing that ships can move, and CI's "
+                "enforcing run is then judged against numbers measured on CI's own vectors."
             )
         values = commission(artifact, landings)
         reload_config()

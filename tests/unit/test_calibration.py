@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from scripts.calibrate import REPO_CONFIG_PATH, commissioning_would_move_shipped_guards
 
 from src.contracts.thresholds import ScoringConfig, scoring_config
 from src.retrieval.calibration import (
@@ -635,3 +636,29 @@ class TestCalibrationCorpus:
         assert same == 128, "96 from 32 singleton families + 32 from 4 version families"
         assert same >= CONFIG.calibration.min_same_topic_pairs
         assert total - same >= CONFIG.calibration.min_background_pairs
+
+
+class TestStandInCommissioningIsRedirected:
+    """Amendment N. CI commissions its OWN baselines, never the shipped ones.
+
+    The refusal used to key on the embedder alone: commissioning under the
+    stand-in was refused outright. That made CI's enforcing calibration
+    impossible to judge against numbers measured on CI's own vectors — it could
+    only be judged against production's, which describe a different model.
+
+    What the refusal actually protects is the COMMITTED constants, so it now
+    tests for those. Redirected to a scratch copy, a stand-in commissioning
+    moves nothing that ships.
+    """
+
+    def test_the_committed_config_is_protected(self) -> None:
+        assert commissioning_would_move_shipped_guards(REPO_CONFIG_PATH)
+
+    def test_a_relative_path_to_the_committed_config_is_still_protected(self) -> None:
+        """Resolved, not compared as text — `config/../config/scoring.yaml` is
+        the same file and must not be a way around the refusal."""
+        sneaky = REPO_CONFIG_PATH.parent / ".." / "config" / "scoring.yaml"
+        assert commissioning_would_move_shipped_guards(sneaky)
+
+    def test_a_scratch_copy_is_not_protected(self, tmp_path: Path) -> None:
+        assert not commissioning_would_move_shipped_guards(tmp_path / "scoring.yaml")

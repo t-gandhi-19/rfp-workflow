@@ -271,6 +271,27 @@ compose smoke job that brings up the stack, applies migrations, and exercises a
 real client-credentials token against write-api (expecting 200, 401, and 403 in
 the right places).
 
+### What CI proves, and what it does not
+
+CI has no Ollama (see [Local models](#local-models)), so it ingests and
+calibrates with a deterministic stand-in embedder. That makes the split between
+the two kinds of evidence in this repo load-bearing, so it is stated in one form
+everywhere it applies — here and in `src/gateway/fake_embedder.py`:
+
+> **CI proves the calibration and retrieval machinery end to end.
+> The real-model run quoted in every PR proves the semantics.**
+
+Neither substitutes for the other. A green CI says the guards compute, gate and
+refuse correctly on vectors whose geometry is known by construction — the
+separation guards run **enforcing**, with no exemption, against baselines CI
+commissions from its own vectors into a scratch config it cannot write back to.
+It says nothing whatever about whether retrieval finds the right answer, because
+those vectors carry no meaning.
+
+That question is settled only by the zero-tolerance retrieval evals on real
+embeddings, whose numbers every PR quotes. **No CI result may be quoted in their
+place.**
+
 ## Changelog
 
 ### v0.1 — Phase 1: skeleton and contracts

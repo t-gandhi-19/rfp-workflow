@@ -20,16 +20,16 @@ assertions read the Makefile as text and catch exactly that. They do not need
 make, a stack, or a model, which is what makes them cheap enough to guard every
 target rather than the one that broke.
 
-The companion coverage is in CI: the smoke job invokes the schema flow THROUGH
-`make apply-schema` rather than `python -m scripts.apply_schema`, so that recipe
-actually executes, and it deliberately no longer exports NEO4J_URI itself —
-supplying by hand what the recipe must supply is what hid the fault.
+The companion coverage is in CI: the smoke job runs the schema, ingest and
+calibrate flows THROUGH their make targets rather than through
+`python -m scripts.*`, so those recipes actually execute, and those steps
+deliberately no longer export NEO4J_URI themselves — supplying by hand what the
+recipe must supply is what hid the fault.
 
-The ingest and calibrate flows follow in the amendment-N commit: `make ingest`
-runs calibrate, which the stand-in embedder could not pass until that commit
-gave it family anchors. `make preflight` stays out of CI scope permanently — its
-checks need Ollama, which CI does not run (CLAUDE.md rule 26), so the assertions
-here are the only coverage those two targets can have.
+`make preflight` and `make preflight-pre-ingest` stay out of CI scope
+permanently: their checks need Ollama, which CI does not run (CLAUDE.md rule
+26). The assertions here are the only coverage those two targets can have, which
+is exactly why they exist — the fault was in one of them.
 """
 
 from __future__ import annotations

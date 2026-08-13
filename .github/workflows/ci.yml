@@ -130,11 +130,55 @@ jobs:
           make apply-schema
           make apply-schema
 
-      - name: Ingest fixtures with the deterministic stand-in embedder
+      # CI COMMISSIONS ITS OWN GUARD BASELINES (amendment N).
+      #
+      # The baselines in config/scoring.yaml were measured against
+      # nomic-embed-text on real vectors. They describe that model, so CI must
+      # neither be judged against them nor be able to move them. `calibrate`
+      # refuses the second outright: commissioning under the stand-in is allowed
+      # only when RFP_CONFIG_DIR points somewhere other than the committed
+      # config, so nothing that ships can change here.
+      #
+      # Commissioned once per run, from CI's own vectors, and the enforcing
+      # calibration below is then judged against those. Deterministic by
+      # construction — the stand-in is a pure function of the fixtures — so this
+      # is a fixed comparison, not a ratchet that resets itself.
+      - name: Commission CI's own calibration baselines into a scratch config
+        run: |
+          set -a && source .env && set +a
+          export RFP_FAKE_EMBEDDINGS=1
+          export RFP_CONFIG_DIR="$RUNNER_TEMP/ci-config"
+          cp -r config "$RFP_CONFIG_DIR"
+          # --dry-run so this writes the baselines and nothing else; the
+          # enforcing run below produces the artifact of record.
+          uv run python -m scripts.calibrate --commission --dry-run --skip-persist
+
+      # THROUGH THE MAKE TARGETS: apply-schema, ingest and calibrate all run
+      # from their real recipes. `-o preflight-pre-ingest` marks only that
+      # prerequisite old — its checks need Ollama, which CI never runs
+      # (CLAUDE.md rule 26). Everything else in the chain executes.
+      #
+      # Calibration runs here with BOTH TIERS ENFORCING and no exemption: tier 1
+      # against the commissioned median gap, tier 2 landing all twenty golden
+      # questions on the derived floor. Under v2 this was impossible — the
+      # stand-in's separation was negative and `make calibrate` refused, so the
+      # guards were the one thing CI could not exercise.
+      - name: Ingest and calibrate through the make targets, both tiers enforcing
+        run: |
+          set -a && source .env && set +a
+          export RFP_FAKE_EMBEDDINGS=1
+          export RFP_CONFIG_DIR="$RUNNER_TEMP/ci-config"
+          make -o preflight-pre-ingest ingest
+
+      - name: Ingest is idempotent
         run: |
           set -a && source .env && set +a
           export NEO4J_URI=bolt://localhost:${NEO4J_BOLT_PORT_HOST:-7687}
           export RFP_FAKE_EMBEDDINGS=1
+          # Invoked directly rather than through `make ingest`: this compares two
+          # runs' JSON on stdout, and the make target also runs calibrate, whose
+          # report is not JSON. The recipe is exercised by the step above; what
+          # this adds is the comparison.
           uv run python -m scripts.ingest > /tmp/ingest-first.json
           uv run python -m scripts.ingest > /tmp/ingest-second.json
           python - <<'PY'
@@ -143,6 +187,7 @@ jobs:
           second = json.load(open("/tmp/ingest-second.json"))
           for key in ("nodes", "relationships", "by_label", "by_relationship"):
               assert first[key] == second[key], f"ingest is not idempotent: {key} changed"
+          assert first["nodes"] > 0, "the graph is empty; the ingest above did not land"
           assert second["questions_embedded"] == 0, "re-ingest re-embedded existing questions"
           print(f"ingest idempotent: {first['nodes']} nodes, {first['relationships']} relationships")
           PY
