@@ -49,7 +49,35 @@ rerank:
   # CPU-only host, and "it feels better" is not a reason to pay that. Whichever
   # way it lands, the unused path stays tested in CI via recorded responses.
   #
-  # STATUS: not yet applied — the ablation runs with the eval harness.
+  # STATUS: APPLIED 2026-08-13. Measured once, deliberately, on real embeddings
+  # against the final scoring, after the units fix (aa91ae0). Both arms ran on
+  # the same graph, the same artifact and the same 20 golden questions.
+  #
+  #                        rerank OFF     rerank ON      delta (on - off)
+  #   Recall@5               1.0000         1.0000          0.0000
+  #   MRR                    0.9667         1.0000         +0.0333
+  #   preference-decisive    0.0667         0.0000         -0.0667
+  #   wall clock             ~40s           33m 17s
+  #
+  #   rule:  |dRecall@5| < 0.02  AND  |dMRR| < 0.03  ->  enabled: false
+  #   applied: 0.0000 < 0.02 is TRUE; 0.0333 < 0.03 is FALSE.
+  #            The AND fails, so the rule does not fire.
+  #
+  # DECISION: enabled stays TRUE, cost accepted. It is a close call — 0.0333
+  # against a 0.03 threshold — and it is recorded as close rather than rounded
+  # into comfort.
+  #
+  # WHERE THE WHOLE DELTA COMES FROM. One question. On golden 1.1 the rerank-off
+  # arm ranks ANS-0032 (a WON RACI answer) above ANS-0037 (the LOST team-model
+  # answer the hand-written key names as "the only direct team-model answer"),
+  # because preference overturned a relevance gap of 1.0000 vs 0.8247. Rerank
+  # puts ANS-0037 back at rank 1. Recall@5 cannot see this — ANS-0037 is at rank
+  # 2 either way — so MRR is the metric carrying the signal, which is why the
+  # rule reads both.
+  #
+  # So the cost buys a specific thing rather than a general feeling: it corrects
+  # the one case in this set where preference decided a ranking relevance should
+  # have decided. Reassess if the corpus or the preference multipliers change.
   enabled: true
   # Gateway alias. Application code never names the model.
   alias: rerank-model
