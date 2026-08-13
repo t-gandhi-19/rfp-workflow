@@ -257,6 +257,61 @@ no-auto-submission rule, or the never-granted `submitter` role — those remain
 CLAUDE.md golden rules and are unaffected. Human review is still the terminal
 stage of every run.
 
+### D19 addendum / amendment S — self-consistency is not agreement
+
+**The canary had a blind spot, and it was structural.** D19 replaced a
+distribution proxy with a probe-based ratchet: `make calibrate` lands the twenty
+golden questions on the freshly derived floor and checks each falls on the
+correct side. It was described as "the zero-tolerance eval core embedded into
+calibration", and it could not see the most serious defect this phase found.
+
+`scripts/calibrate` embeds the corpus, takes dot products, derives a floor, and
+lands its probes — all with the same arithmetic. Retrieval judges scores that
+come out of the Neo4j vector index, which returns `(1 + cos) / 2` for a cosine
+index. **The floor was derived in one unit and applied in another.** The
+background *median* cosine of 0.4930 arrived at the floor as 0.7465, calibrated
+to 0.9092, and cleared a floor of 0.5975 — so the floor rejected nothing, and
+all twenty golden questions MATCHED including the three the corpus cannot
+answer. Recall@5 was 0.2667 while every guard reported green.
+
+The probe gate saw none of it because it never reads the index. It was entirely
+self-consistent, and consistently wrong against production.
+
+**The general rule, which is the decision:**
+
+> When two subsystems must agree on a unit or a scale, an agreement test exists
+> **between** them. A check that shares its inputs with the thing it checks can
+> only prove self-consistency, and self-consistency is not agreement.
+
+**Implemented as four things, so the class is closed rather than the instance:**
+
+1. `src/retrieval/units.py` — samples a fixed set of committed pairs, computes
+   similarity by direct dot product **and** through the live index, and refuses
+   if they differ by more than ε. Runs inside `make calibrate` (fatal, before
+   the artifact is written) and inside `make preflight` (cheap: 3 probes, 5
+   neighbours, no model call). Failure prints both observed values and names
+   both paths.
+2. ε = 1e-2, derived in the module. float32's roundoff bounds the disagreement
+   at ~9.2e-5; **measurement exceeds that** — up to 2.5e-3 across the 15 pairs
+   sampled — consistent with the index scoring on a reduced-precision
+   representation. So ε is set from what the check must *discriminate*: the two
+   competing unit hypotheses are separated by ≥ 0.1 for any non-duplicate pair,
+   making 1e-2 about 4× the worst observation and ≥ 10× tighter than the fault.
+   A future sample approaching ε is a finding for this register, not a number to
+   raise.
+3. The conversion exists at **exactly one site**, asserted by a repo-wide AST
+   scan (`tests/security/test_units_conversion_single_site.py`). Applied twice
+   it inverts the scale; applied to an already-converted cosine it reproduces
+   the original defect.
+4. An integration test lands D19 probe 2.7 through **both** paths and requires
+   the margins to agree within 0.05 — twice the largest of the corroboration
+   deltas measured when the fix landed (0.0026, 0.0030, 0.0060, 0.0141, 0.0246).
+   The margin, not the cosine, is what tier 2 gates on.
+
+**What this does not claim.** The probe gate is still worth having; it catches
+corpus and model drift, which an agreement test cannot. The two are
+complementary, and the lesson is about what a guard's *inputs* let it see.
+
 ### D17 addendum — the protected sliver is measured and accepted
 
 D17 split **relevance** (does this candidate qualify?) from **preference** (which

@@ -22,9 +22,19 @@ from neo4j import AsyncSession
 
 from src.contracts.embedding import EmbedRole, embedding_config
 from src.contracts.enums import EntityType, Outcome, RetrievalStatus  # noqa: F401
-from src.gateway.fake_embedder import fake_embedding
+from src.evals.retrieval import golden_questions
+from src.gateway.client import GatewayClient
+from src.gateway.fake_embedder import fake_embedding, fake_embeddings, fake_embeddings_enabled
 from src.graph import queries
 from src.graph.driver import close_driver, get_driver
+from src.retrieval.calibration import (
+    calibration_corpus,
+    cosine,
+    indexed_ids,
+    load_for_current_corpus,
+)
+from src.retrieval.units import EPSILON as UNITS_EPSILON
+from src.retrieval.units import check_units_agreement
 from tests.live import require_neo4j
 
 pytestmark = pytest.mark.integration
@@ -60,6 +70,25 @@ def pairs() -> list[dict[str, Any]]:
 def _registry_rows(name: str) -> list[dict[str, str]]:
     with (FIXTURES / "registry" / name).open(encoding="utf-8", newline="") as handle:
         return list(csv.DictReader(handle))
+
+
+async def embed_texts(texts: list[str], role: EmbedRole) -> list[list[float]]:
+    """Embed for one side of the geometry, matching how calibration does it.
+
+    Uses the stand-in when CI has opted in, so the probe-agreement test runs in
+    both worlds — the units question is about scales, not semantics, and the
+    stand-in's vectors have a real geometry to disagree about.
+    """
+    config = embedding_config()
+    if fake_embeddings_enabled():
+        return fake_embeddings(texts, config.model.dimensions, role=role)
+    client = GatewayClient.from_env()
+    vectors: list[list[float]] = []
+    for start in range(0, len(texts), 16):
+        vectors.extend(
+            await client.embed(texts[start : start + 16], alias=config.model.alias, role=role)
+        )
+    return vectors
 
 
 async def _ingested(session: AsyncSession) -> bool:
@@ -278,6 +307,73 @@ class TestVectorSearch:
         others = [hit.score for hit in hits if hit.score < 0.99]
         assert others, "expected hits beyond the probe and its duplicates"
         assert max(others) < 0.75, f"non-duplicate hits reach {max(others):.4f}; band looks wrong"
+
+    async def test_the_two_similarity_paths_agree_on_units(self, session: AsyncSession) -> None:
+        """Amendment S, at the level preflight runs it."""
+        samples = await check_units_agreement(session)
+        assert samples, "the agreement check compared nothing"
+        worst = max(sample.delta for sample in samples)
+        assert worst <= UNITS_EPSILON, f"worst disagreement {worst:.2e} exceeds {UNITS_EPSILON}"
+
+    async def test_a_d19_probe_lands_the_same_through_both_paths(
+        self, session: AsyncSession
+    ) -> None:
+        """The agreement that actually matters, on the number that gates.
+
+        The units check above compares raw similarities. This compares what the
+        two paths CONCLUDE: a D19 probe's margin against the derived floor,
+        computed the way `scripts/calibrate` computes it (embed the corpus
+        directly, dot product, calibrate) and the way retrieval computes it
+        (through the vector index). Those were the two subsystems that disagreed,
+        and the margin is what the tier-2 ratchet gates on — so agreeing on
+        cosines but not on margins would still be a defect.
+
+        Probe 2.7 is used because it is an unanswerable: it must land BELOW the
+        floor, so a units error shows up as a sign change rather than as a small
+        numeric drift.
+
+        THE TOLERANCE IS THE CORROBORATION BAND, measured rather than chosen.
+        When the units fix landed, the eval's probe margins reproduced the
+        commissioning run's across all five probes with deltas of 0.0026, 0.0030,
+        0.0060, 0.0141 and 0.0246 — a spread of 0.003 to 0.025 arising from
+        float32 storage, the graph path's extra hop, and the two paths embedding
+        from the same text at different times. 0.05 is twice the largest of those
+        and still far below the ~0.3 margin the probe carries, so it accepts the
+        known spread while failing any real divergence.
+        """
+        artifact = load_for_current_corpus()
+        probe = next(q for q in golden_questions() if q["number"] == "2.7")
+
+        # Calibration's path: embed both sides directly, dot product, calibrate.
+        documents = sorted(indexed_ids(calibration_corpus()))
+        text_by_id = {row["question_id"]: row["question"] for row in calibration_corpus()}
+        document_vectors = await embed_texts(
+            [text_by_id[qid] for qid in documents], EmbedRole.DOCUMENT
+        )
+        query_vector = (await embed_texts([probe["text"]], EmbedRole.QUERY))[0]
+        best_direct = max(cosine(query_vector, vector) for vector in document_vectors)
+        direct_margin = artifact.derived_floor - artifact.calibrated(best_direct)
+
+        # Retrieval's path: through the vector index.
+        hits = await queries.find_similar_questions(
+            session,
+            embedding=query_vector,
+            domain="cloud_migration",
+            requesting_customer=MERIDIAN,
+            k=20,
+        )
+        assert hits, "the probe returned no candidates at all"
+        best_index = max(hit.score for hit in hits)
+        index_margin = artifact.derived_floor - artifact.calibrated(best_index)
+
+        # Both must agree that it is below the floor — the sign is the gate.
+        assert direct_margin > 0, f"probe 2.7 cleared the floor on the direct path: {direct_margin}"
+        assert index_margin > 0, f"probe 2.7 cleared the floor on the index path: {index_margin}"
+        assert abs(direct_margin - index_margin) <= 0.05, (
+            f"the two paths disagree on probe 2.7's margin: direct {direct_margin:+.4f} "
+            f"vs index {index_margin:+.4f}. The tier-2 ratchet gates on this number, so "
+            "the path that derives it and the path that applies it must agree."
+        )
 
     async def test_an_unknown_domain_returns_nothing(self, session: AsyncSession) -> None:
         hits = await queries.find_similar_questions(

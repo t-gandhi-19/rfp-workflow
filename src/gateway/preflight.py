@@ -36,6 +36,8 @@ from src.gateway.client import GatewayClient, GatewayError
 from src.gateway.model_pins import GatewayModel, drifting_models, parse_gateway_models
 from src.gateway.ollama_admin import installed_tags, is_installed
 from src.retrieval.calibration import CalibrationError, load_for_current_corpus
+from src.retrieval.units import EPSILON as UNITS_EPSILON
+from src.retrieval.units import UnitsDisagreementError, check_units_agreement
 
 
 @dataclass(frozen=True)
@@ -301,6 +303,65 @@ async def check_neo4j_auth(env: dict[str, str]) -> CheckResult:
     return CheckResult(name=name, ok=True, detail=f"{uri} accepted {user}")
 
 
+async def check_units_agree(env: dict[str, str]) -> CheckResult:
+    """Calibration and the vector index agree on what a similarity IS (amendment S).
+
+    The floor is DERIVED in one path and APPLIED in another. Calibration measures
+    its anchors with a dot product and never reads the index; retrieval judges
+    scores that come out of the index. Nothing compared the two until a units
+    defect had already shipped — Neo4j returns `(1 + cos) / 2` for a cosine
+    index, so every candidate was inflated and the floor rejected nothing.
+
+    The D19 probe gate could not see it, because it lands its probes using
+    calibration's own dot product. A guard that shares its inputs with the thing
+    it guards proves self-consistency and nothing else. This check exists to be
+    the one that does not share inputs.
+
+    Cheap on purpose: three probes, five neighbours each, over vectors already
+    in the graph. No model call.
+    """
+    name = "calibration and the vector index agree on units"
+    uri = env.get("NEO4J_URI") or f"bolt://localhost:{env.get('NEO4J_BOLT_PORT_HOST', '7687')}"
+    user = env.get("NEO4J_USER", "neo4j")
+    password = env.get("NEO4J_PASSWORD", "")
+    if not password:
+        return CheckResult(name=name, ok=False, detail="NEO4J_PASSWORD is not set")
+
+    driver = AsyncGraphDatabase.driver(uri, auth=(user, password))
+    try:
+        async with driver.session() as session:
+            samples = await check_units_agreement(session)
+    except UnitsDisagreementError as exc:
+        return CheckResult(
+            name=name,
+            ok=False,
+            detail=str(exc).splitlines()[0],
+            fix="see the full comparison above; retrieval must not run until they agree",
+        )
+    except (AuthError, ServiceUnavailable, OSError, ValueError) as exc:
+        # The Neo4j probe above reports connectivity properly; this check simply
+        # cannot run without a graph and says so rather than masquerading as a
+        # units failure.
+        return CheckResult(
+            name=name,
+            ok=False,
+            detail=f"could not reach the graph to compare ({type(exc).__name__})",
+            fix="make up && make ingest",
+        )
+    finally:
+        await driver.close()
+
+    worst = max(sample.delta for sample in samples)
+    return CheckResult(
+        name=name,
+        ok=True,
+        detail=(
+            f"{len(samples)} pair(s) compared; worst disagreement {worst:.2e} "
+            f"(epsilon {UNITS_EPSILON})"
+        ),
+    )
+
+
 def check_calibration_is_fresh() -> CheckResult:
     """The calibration artifact exists and still describes this model and corpus.
 
@@ -380,6 +441,12 @@ async def run_preflight(
         results.append(await check_neo4j_auth(env))
     if include_calibration:
         results.append(check_calibration_is_fresh())
+        # Amendment S. Needs BOTH: a calibrated corpus to have something the
+        # units matter for, and a graph to read the index side from. Skipped
+        # when either is absent rather than reported as a units failure — a
+        # check that cannot run has not found anything.
+        if include_neo4j:
+            results.append(await check_units_agree(env))
     return results
 
 

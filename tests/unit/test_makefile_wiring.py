@@ -69,11 +69,12 @@ REQUIRED_WIRING: dict[str, set[str]] = {
     "apply-schema": {HOST_NEO4J},
     "ingest": {HOST_NEO4J},
     "reembed": {HOST_NEO4J},
-    # Dials the gateway and the write-api, never Neo4j: it reads fixtures from
-    # disk. HOST_NEO4J here would imply a dependency that does not exist.
-    "calibrate": {PREFLIGHT_ENV},
-    "calibrate-dry": {PREFLIGHT_ENV},
-    "calibrate-commission": {PREFLIGHT_ENV},
+    # Since amendment S these dial Neo4j too: calibration compares its own
+    # similarity against the vector index before writing an artifact, because a
+    # floor derived in one unit and applied in another is not a floor.
+    "calibrate": {HOST_NEO4J, PREFLIGHT_ENV},
+    "calibrate-dry": {HOST_NEO4J, PREFLIGHT_ENV},
+    "calibrate-commission": {HOST_NEO4J, PREFLIGHT_ENV},
     # Postgres over the published port, via Alembic.
     "migrate": {HOST_PG},
     "migrate-status": {HOST_PG},
@@ -87,7 +88,20 @@ REQUIRED_WIRING: dict[str, set[str]] = {
 #: Targets that dial Neo4j from the host. Named separately from the table above
 #: so the rule is legible on its own: this is the exact set the shipped fault
 #: belonged to.
-DIALS_NEO4J_FROM_HOST = {"preflight", "preflight-pre-ingest", "apply-schema", "ingest", "reembed"}
+DIALS_NEO4J_FROM_HOST = {
+    "preflight",
+    "preflight-pre-ingest",
+    "apply-schema",
+    "ingest",
+    "reembed",
+    # Amendment S. This row is a claim about what a command TOUCHES, so it moved
+    # when the command changed rather than being kept as a tidy invariant: the
+    # previous version of this file asserted the opposite for calibrate, and was
+    # right to, until calibration gained an agreement check against the index.
+    "calibrate",
+    "calibrate-dry",
+    "calibrate-commission",
+}
 
 
 def read_makefile() -> str:
@@ -177,16 +191,27 @@ class TestHostAddressWiring:
         resolve from the host shell — so the host forms are separate variables."""
         assert PREFLIGHT_ENV in recipes()[target]
 
-    def test_calibrate_does_not_claim_a_neo4j_dependency_it_does_not_have(self) -> None:
-        """Wiring is a claim about what a command touches.
+    def test_wiring_is_a_claim_about_what_a_command_touches(self) -> None:
+        """Not a tidy invariant — a statement that has to track the code.
 
-        `scripts.calibrate` reads fixtures from disk and calls the gateway and
-        the write-api. It never opens a graph session, so HOST_NEO4J on it would
-        assert a dependency that does not exist and would make the table above
-        stop meaning anything.
+        This assertion used to say the OPPOSITE: `calibrate` must not carry
+        HOST_NEO4J, because it read fixtures and called the gateway and never
+        opened a graph session. That was correct until amendment S gave
+        calibration an agreement check against the vector index, at which point
+        the dependency became real and the row had to move with it.
+
+        Kept as a live example: a table claiming a dependency a command does not
+        have is as wrong as one missing a dependency it does, and both are only
+        caught by re-reading the recipe against the code rather than against the
+        previous expectation.
         """
+        assert "scripts.calibrate" in recipes()["calibrate"]
         for target in ("calibrate", "calibrate-dry", "calibrate-commission"):
-            assert HOST_NEO4J not in recipes()[target]
+            assert HOST_NEO4J in recipes()[target]
+
+        # `fixtures` touches neither, so the table is not vacuously true.
+        assert HOST_NEO4J not in recipes()["fixtures"]
+        assert PREFLIGHT_ENV not in recipes()["fixtures"]
 
     def test_every_required_fragment_is_present(self) -> None:
         """The table, applied in full."""

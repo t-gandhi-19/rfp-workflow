@@ -207,22 +207,26 @@ manual-key-schema: ## Regenerate the manual answer key's JSON Schema from the mo
 calibrate: check-env ## Measure the retrieval calibration anchors and derive the match floor
 	@# Retrieval is fail-closed on the artifact this produces (amendment J), so
 	@# this is not an optional tuning step — without it nothing retrieves.
+	@# HOST_NEO4J since amendment S: calibration now compares its own similarity
+	@# against the vector index before writing an artifact, so it dials the graph.
 	@set -a && source .env && set +a && \
-		$(PREFLIGHT_ENV) WRITE_API_PORT=$${WRITE_API_PORT:-8001} \
+		$(HOST_NEO4J) $(PREFLIGHT_ENV) WRITE_API_PORT=$${WRITE_API_PORT:-8001} \
 		$(RUN) python -m scripts.calibrate
 
 .PHONY: calibrate-dry
 calibrate-dry: check-env ## Measure and print the anchors without writing anything
 	@set -a && source .env && set +a && \
-		$(PREFLIGHT_ENV) $(RUN) python -m scripts.calibrate --dry-run
+		$(HOST_NEO4J) $(PREFLIGHT_ENV) $(RUN) python -m scripts.calibrate --dry-run
 
 .PHONY: calibrate-commission
 calibrate-commission: check-env ## SET the separation guard baselines from a real measurement (D18)
 	@# The one command that may move the baselines. Ordinary `make calibrate` is
 	@# JUDGED against them — a ratchet that resets itself on every run never
 	@# catches anything. Refuses to run against the stand-in embedder.
+	@# HOST_NEO4J since amendment S: calibration now compares its own similarity
+	@# against the vector index before writing an artifact, so it dials the graph.
 	@set -a && source .env && set +a && \
-		$(PREFLIGHT_ENV) WRITE_API_PORT=$${WRITE_API_PORT:-8001} \
+		$(HOST_NEO4J) $(PREFLIGHT_ENV) WRITE_API_PORT=$${WRITE_API_PORT:-8001} \
 		$(RUN) python -m scripts.calibrate --commission
 
 .PHONY: ingest

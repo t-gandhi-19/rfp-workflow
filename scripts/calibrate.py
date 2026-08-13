@@ -39,6 +39,7 @@ from src.contracts.embedding import EmbedRole, embedding_config
 from src.contracts.thresholds import ScoringConfig, config_dir, reload_config, scoring_config
 from src.gateway.client import GatewayClient
 from src.gateway.fake_embedder import fake_embeddings, fake_embeddings_enabled
+from src.graph.driver import close_driver, get_driver
 from src.retrieval.calibration import (
     BAITS,
     CALIBRATION_PATH,
@@ -55,6 +56,8 @@ from src.retrieval.calibration import (
     indexed_ids,
     save,
 )
+from src.retrieval.units import EPSILON as UNITS_EPSILON
+from src.retrieval.units import UnitsDisagreementError, check_units_agreement
 
 BATCH = 16
 
@@ -445,6 +448,30 @@ def stamp_config(artifact: CalibrationArtifact, path: Path | None = None) -> Non
     )
 
 
+async def verify_units_against_the_index() -> None:
+    """Amendment S: the derived floor's unit must be the applied floor's unit.
+
+    Deliberately fatal and deliberately not optional. The alternative — warn and
+    continue — writes an artifact whose floor is known to be judged in a
+    different scale than it was measured in, which is precisely the state that
+    made every golden question MATCH while looking entirely plausible.
+    """
+    driver = get_driver()
+    try:
+        async with driver.session() as session:
+            samples = await check_units_agreement(session)
+    except UnitsDisagreementError as exc:
+        raise CalibrationError(str(exc)) from exc
+    finally:
+        await close_driver()
+
+    worst = max(sample.delta for sample in samples)
+    sys.stdout.write(
+        f"  units agreement    {len(samples)} pair(s), worst {worst:.2e} "
+        f"(epsilon {UNITS_EPSILON})   calibration == vector index\n\n"
+    )
+
+
 async def run(*, dry_run: bool, skip_persist: bool, commissioning: bool) -> int:
     if fake_embeddings_enabled():
         sys.stderr.write(
@@ -491,6 +518,17 @@ async def run(*, dry_run: bool, skip_persist: bool, commissioning: bool) -> int:
     # commissioning run that somehow produced baselines it could not itself
     # satisfy would fail rather than be recorded.
     check_floor_discrimination(landings)
+
+    # AMENDMENT S. Everything above this line is calibration talking to itself:
+    # it embeds the corpus, takes dot products, derives a floor, and lands its
+    # probes with the same arithmetic. That is self-consistency, and it is what
+    # let a units defect ship — the floor was derived here in cosine and applied
+    # by retrieval to a Neo4j index score, which is (1 + cos) / 2.
+    #
+    # So before the artifact is written, the two paths are compared on the same
+    # vectors. A floor measured in one unit and applied in another is not a
+    # floor, so this refuses rather than warns.
+    await verify_units_against_the_index()
 
     if dry_run:
         sys.stdout.write("--dry-run: nothing further written.\n\n")
