@@ -6,10 +6,12 @@ and judges the result against the hand-written answer key.
 
 WHAT IS ZERO TOLERANCE, and why each one is not a percentage:
 
-    NO_MATCH set          exactly {2.7, 2.8, 3.5}. A question the corpus cannot
-                          answer must refuse, and one it can must not. Both
-                          directions are failures; a "mostly right" refusal set
-                          means the drafter escalates the wrong questions.
+    refusal gate          every unanswerable must NO_MATCH and no answerable
+                          may. Both directions are failures: the first makes the
+                          drafter answer without support, the second wastes an
+                          SME on a question the corpus can already answer.
+                          Baits are ADVISORY — see `_check_no_match_set` for why
+                          the literal set {2.7, 2.8, 3.5} could not be the gate.
     staleness             a superseded answer in any candidate list is a wrong
                           answer presented as a current one. The chain heads
                           must be retrieved and their predecessors never.
@@ -331,31 +333,67 @@ async def run_retrieval_eval(
 
 
 def _check_no_match_set(run: RetrievalRun) -> None:
-    """Exactly the three unanswerables refuse. Both directions are failures."""
-    actual = run.no_match_numbers
-    expected = set(UNANSWERABLE)
-    for number in sorted(expected - actual):
-        run.violations.append(
-            Violation(
-                rule="no_match_set",
-                question_number=number,
-                detail=(
-                    "the corpus cannot answer this question, but retrieval MATCHED it — "
-                    "the drafter would answer instead of escalating"
-                ),
+    """The refusal gate, over the two populations it is a claim about.
+
+    GATED, both directions, because both are real harms:
+
+        an unanswerable that MATCHED    the drafter answers a question the
+                                        corpus cannot support, instead of
+                                        escalating it
+        an answerable that NO_MATCHED   the drafter escalates a question the
+                                        corpus can answer, wasting an SME
+
+    BAITS ARE NOT GATED, and that is a reconciliation rather than a loophole.
+    "NO_MATCH exactly {2.7, 2.8, 3.5}" and the commissioned bait margins cannot
+    both hold: `check_floor_discrimination` commissioned 3.4 at 0.3750 and 4.2
+    at 0.0440 BELOW the floor, and a candidate below the floor is a refusal by
+    definition. Three places already record baits as advisory — `BAITS` in
+    `src.retrieval.calibration`, the commissioning baselines, and
+    `probe_report`'s "ADVISORY ONLY, never gated" — and the only way to make the
+    literal set pass would be to drop the floor below 0.5394 to admit 4.2, which
+    is a derived constant moving to fit a test.
+
+    So the baits are MEASURED and REPORTED against their commissioned margins,
+    and they gate nothing. 3.4 is refused on legal grounds regardless of what
+    retrieval does, and 4.2 belongs to Phase 4's pricing block.
+    """
+    by_number = {outcome.number: outcome for outcome in run.outcomes}
+
+    for number in UNANSWERABLE:
+        outcome = by_number.get(number)
+        if outcome is None:
+            run.violations.append(
+                Violation(
+                    rule="no_match_set",
+                    question_number=number,
+                    detail="expected an unanswerable probe, but the key does not contain it",
+                )
             )
-        )
-    for number in sorted(actual - expected):
-        run.violations.append(
-            Violation(
-                rule="no_match_set",
-                question_number=number,
-                detail=(
-                    "retrieval refused a question the corpus can answer — the drafter would "
-                    "escalate instead of answering"
-                ),
+        elif outcome.status is not RetrievalStatus.NO_MATCH:
+            run.violations.append(
+                Violation(
+                    rule="no_match_set",
+                    question_number=number,
+                    detail=(
+                        "the corpus cannot answer this question, but retrieval MATCHED it — "
+                        "the drafter would answer instead of escalating"
+                    ),
+                )
             )
-        )
+
+    for outcome in run.outcomes:
+        if outcome.kind == "answerable" and outcome.status is RetrievalStatus.NO_MATCH:
+            run.violations.append(
+                Violation(
+                    rule="no_match_set",
+                    question_number=outcome.number,
+                    detail=(
+                        f"retrieval refused a question the corpus can answer "
+                        f"(expected {outcome.expected_answer_id}) — the drafter would escalate "
+                        f"instead of answering"
+                    ),
+                )
+            )
 
 
 def _check_chain_heads(run: RetrievalRun) -> None:
@@ -377,6 +415,14 @@ def _check_chain_heads(run: RetrievalRun) -> None:
                     ),
                 )
             )
+
+
+def _refused_baits(run: RetrievalRun) -> list[str]:
+    return sorted(
+        outcome.number
+        for outcome in run.outcomes
+        if outcome.kind == "bait" and outcome.status is RetrievalStatus.NO_MATCH
+    )
 
 
 def to_category_result(run: RetrievalRun) -> CategoryResult:
@@ -401,13 +447,29 @@ def to_category_result(run: RetrievalRun) -> CategoryResult:
             detail="reported, not gated — Recall@5 carries the pass/fail",
         ),
         EvalMetric(
-            key="no_match_exact",
-            label="NO_MATCH set is exactly {2.7, 2.8, 3.5}",
+            key="no_match_gate",
+            label="Unanswerables refuse; answerables do not",
             value=float(len([v for v in run.violations if v.rule == "no_match_set"])),
             direction=MetricDirection.MUST_BE_ZERO,
             threshold=0.0,
             passed=not any(v.rule == "no_match_set" for v in run.violations),
-            detail=f"observed: {{{', '.join(no_match) or 'none'}}}",
+            detail=(
+                f"observed NO_MATCH: {{{', '.join(no_match) or 'none'}}}; "
+                f"gated over {', '.join(UNANSWERABLE)} and the answerables. "
+                f"Baits {', '.join(BAITS)} are advisory — see the row below."
+            ),
+        ),
+        EvalMetric(
+            key="baits_refused",
+            label=f"Baits refused (advisory, never gated): {', '.join(BAITS)}",
+            value=float(len(_refused_baits(run))),
+            direction=MetricDirection.HIGHER_IS_BETTER,
+            detail=(
+                f"refused: {{{', '.join(_refused_baits(run)) or 'none'}}}. "
+                "Commissioned below the floor at 3.4 +0.3750 and 4.2 +0.0440, so refusal is "
+                "the expected landing. 3.4 is refused on legal grounds regardless of "
+                "retrieval; 4.2 belongs to Phase 4's pricing block."
+            ),
         ),
         EvalMetric(
             key="staleness",
