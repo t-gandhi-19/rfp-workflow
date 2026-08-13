@@ -56,7 +56,13 @@ class RetrievalConfig(BaseModel):
 
     top_k: int = Field(gt=0)
     rerank_top_n: int = Field(gt=0)
-    match_floor: float = Field(ge=0.0, le=1.0)
+    #: In CALIBRATED space, compared against `relevance` — not a cosine.
+    #:
+    #: `extra="forbid"` plus the rename from `match_floor` (amendment L) is what
+    #: turns a stale reference into a load-time failure: a config still carrying
+    #: the old key is rejected outright rather than quietly falling back to a
+    #: default in the wrong units.
+    match_floor_calibrated: float = Field(ge=0.0, le=1.0)
 
 
 class OutcomeMultipliers(BaseModel):
@@ -104,7 +110,10 @@ class CalibrationSettings(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     min_background_pairs: int = Field(gt=0)
-    min_separation: float = Field(ge=0.0)
+    min_same_topic_pairs: int = Field(gt=0)
+    #: In RAW cosine. It is a gap between two raw percentiles measured before
+    #: any mapping exists, so it has no calibrated form (amendment L audit).
+    min_separation_raw: float = Field(ge=0.0)
 
 
 class ScoringConfig(BaseModel):

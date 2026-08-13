@@ -12,10 +12,14 @@ and produced eleven confusing failures.
 
 from __future__ import annotations
 
+from pathlib import Path
+from unittest.mock import patch
+
 import httpx
 import pytest
 
 from src.contracts.embedding import EmbeddingConfig
+from src.gateway import preflight
 from src.gateway.client import GatewayClient
 from src.gateway.model_pins import GatewayModel
 from src.gateway.ollama_admin import is_installed, normalise_tag
@@ -28,6 +32,7 @@ from src.gateway.preflight import (
     ollama_base_url_for_host,
     run_preflight,
 )
+from src.retrieval.calibration import GEOMETRY, CalibrationArtifact, CalibrationError
 
 OLLAMA = "http://localhost:11434"
 GATEWAY = GatewayClient(base_url="http://gateway.test", api_key="k")
@@ -196,22 +201,97 @@ class TestEmbeddingWidth:
         assert result.fix is not None and "make up" in result.fix
 
 
+class TestCalibrationFreshness:
+    """Amendment J. Retrieval is fail-closed on the calibration artifact, so a
+    missing or stale one should surface here rather than as a run refusing
+    partway through — correct behaviour, discovered at the worst moment.
+    """
+
+    def test_a_missing_artifact_fails_and_names_the_fix(self, tmp_path: Path) -> None:
+        with patch.object(preflight, "load_for_current_corpus") as load:
+            load.side_effect = CalibrationError("calibration artifact missing at /x")
+            result = preflight.check_calibration_is_fresh()
+        assert result.ok is False
+        assert result.fix is not None and "make calibrate" in result.fix
+
+    def test_a_stale_artifact_fails(self) -> None:
+        """Stale is the case worth naming: it loads fine and describes nothing."""
+        with patch.object(preflight, "load_for_current_corpus") as load:
+            load.side_effect = CalibrationError(
+                "calibration was measured over corpus abc but the corpus is now def"
+            )
+            result = preflight.check_calibration_is_fresh()
+        assert result.ok is False
+        assert "corpus" in result.detail
+
+    def test_a_current_artifact_passes_and_reports_the_floor(self) -> None:
+        """The derived floor is shown, because it is the number that matters."""
+        artifact = CalibrationArtifact(
+            geometry=GEOMETRY,
+            embed_model_tag="nomic-embed-text:v1.5",
+            corpus_hash="abcdef0123456789",
+            computed_at="2026-08-13T00:00:00+00:00",
+            background_pair_count=12192,
+            same_topic_pair_count=240,
+            bg_p50=0.60,
+            bg_p95=0.72,
+            bg_p99=0.75,
+            same_topic_p05=0.85,
+            same_topic_p50=0.90,
+        )
+        with patch.object(preflight, "load_for_current_corpus", return_value=artifact):
+            result = preflight.check_calibration_is_fresh()
+        assert result.ok is True
+        assert "abcdef0123456789" in result.detail
+        assert "0.6667" in result.detail
+
+
 class TestFullRun:
     async def test_all_green_when_everything_is_in_place(self) -> None:
+        """Ingest's variant: no calibration check, because nothing is calibrated
+        before the corpus it describes has been loaded."""
         async with ollama(INSTALLED) as oc, gateway(768) as gc:
             results = await run_preflight(
-                {}, config=CONFIG, models=MODELS, gateway=GATEWAY, ollama_client=oc, http_client=gc
+                {},
+                config=CONFIG,
+                models=MODELS,
+                gateway=GATEWAY,
+                ollama_client=oc,
+                http_client=gc,
+                include_calibration=False,
             )
         # reachable + explicit-tags + one per distinct tag + width
         assert len(results) == 6
         assert all(r.ok for r in results)
         assert "All checks passed" in format_report(results)
 
+    async def test_the_calibration_check_is_included_by_default(self) -> None:
+        """Standalone `make preflight` checks it; `make ingest` does not."""
+        async with ollama(INSTALLED) as oc, gateway(768) as gc:
+            with patch.object(preflight, "load_for_current_corpus") as load:
+                load.side_effect = CalibrationError("missing")
+                results = await run_preflight(
+                    {},
+                    config=CONFIG,
+                    models=MODELS,
+                    gateway=GATEWAY,
+                    ollama_client=oc,
+                    http_client=gc,
+                )
+        assert len(results) == 7
+        assert results[-1].ok is False
+
     async def test_reports_every_failure_not_just_the_first(self) -> None:
         """One run should tell you everything that is wrong."""
         async with ollama(["llama3.2:3b"]) as oc, gateway(384) as gc:
             results = await run_preflight(
-                {}, config=CONFIG, models=MODELS, gateway=GATEWAY, ollama_client=oc, http_client=gc
+                {},
+                config=CONFIG,
+                models=MODELS,
+                gateway=GATEWAY,
+                ollama_client=oc,
+                http_client=gc,
+                include_calibration=False,
             )
         report = format_report(results)
         assert "3 check(s) failed" in report

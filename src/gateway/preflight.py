@@ -33,6 +33,7 @@ from src.contracts.embedding import EmbeddingConfig, EmbedRole, embedding_config
 from src.gateway.client import GatewayClient, GatewayError
 from src.gateway.model_pins import GatewayModel, drifting_models, parse_gateway_models
 from src.gateway.ollama_admin import installed_tags, is_installed
+from src.retrieval.calibration import CalibrationError, load_for_current_corpus
 
 
 @dataclass(frozen=True)
@@ -210,6 +211,39 @@ async def check_embedding_width(
     )
 
 
+def check_calibration_is_fresh() -> CheckResult:
+    """The calibration artifact exists and still describes this model and corpus.
+
+    Amendment J. Retrieval is fail-closed on this, so without the check the
+    first sign of a missing or stale artifact is a run refusing partway through
+    — which is correct behaviour discovered at the worst moment. Preflight is
+    where the other silent-until-late failures are caught, so it belongs here.
+
+    Staleness is the case worth naming: an artifact measured against a different
+    model, or against the corpus as it was before a regeneration, loads fine and
+    describes a distribution that no longer exists.
+    """
+    name = "calibration artifact is present and current"
+    try:
+        artifact = load_for_current_corpus()
+    except CalibrationError as exc:
+        return CheckResult(
+            name=name,
+            ok=False,
+            detail=str(exc).splitlines()[0],
+            fix="make calibrate     # after 'make up' and 'make ingest'",
+        )
+    return CheckResult(
+        name=name,
+        ok=True,
+        detail=(
+            f"measured {artifact.computed_at} over corpus {artifact.corpus_hash}; "
+            f"separation {artifact.separation:+.4f}, "
+            f"derived floor {artifact.derived_floor():.4f}"
+        ),
+    )
+
+
 async def run_preflight(
     env: dict[str, str],
     *,
@@ -219,11 +253,18 @@ async def run_preflight(
     ollama_client_timeout: float = 10.0,
     ollama_client: httpx.AsyncClient | None = None,
     http_client: httpx.AsyncClient | None = None,
+    include_calibration: bool = True,
 ) -> list[CheckResult]:
     """Run every check and return all results — never short-circuit.
 
     Reporting them all at once means one run tells you everything that is
     wrong, rather than revealing the next problem only after you fix this one.
+
+    `include_calibration` is False when preflight runs AS PART OF ingest. On a
+    clean machine there is no corpus to have calibrated yet, so the check could
+    not pass by construction and would block the very command that produces the
+    thing it looks for. Run standalone — which is what `make preflight` does —
+    it is included, because by then an artifact is expected to exist.
     """
     resolved = config or embedding_config()
     resolved_models = models if models is not None else parse_gateway_models()
@@ -242,6 +283,8 @@ async def run_preflight(
     # The embedding model is the one alias with a deeper check: its output has a
     # fixed width that the Neo4j index depends on, and a mismatch is silent.
     results.append(await check_embedding_width(gw, resolved, client=http_client))
+    if include_calibration:
+        results.append(check_calibration_is_fresh())
     return results
 
 

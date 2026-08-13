@@ -12,8 +12,9 @@ import math
 
 import pytest
 
-from src.contracts import Outcome, RetrievalStatus
+from src.contracts import Outcome, RetrievalStatus, ScoredCandidate
 from src.contracts.thresholds import scoring_config
+from src.retrieval.calibration import GEOMETRY, CalibrationArtifact
 from src.retrieval.scoring import (
     CandidateInput,
     blend,
@@ -31,7 +32,35 @@ CONFIG = scoring_config()
 WON, UNKNOWN, LOST = 1.15, 1.0, 0.85
 DECAY_DAYS = 540
 EVIDENCE = 1.1
-FLOOR = 0.55
+FLOOR = 0.50
+
+# A calibration artifact with anchors in a realistic band for a prefixed
+# nomic-embed-text corpus, chosen to divide cleanly so every value below can be
+# worked out by hand rather than recomputed from the code under test.
+#
+#   span            = same_topic_p50 - bg_p50 = 0.90 - 0.60 = 0.30
+#   calibrated(x)   = (x - 0.60) / 0.30, clamped to [0, 1]
+#
+#   raw 0.60 -> 0.0000     raw 0.80 -> 0.6667
+#   raw 0.70 -> 0.3333     raw 0.85 -> 0.8333
+#   raw 0.75 -> 0.5000     raw 0.90 -> 1.0000
+#
+# The pair counts are the ones the real corpus produces (40 questions + 72
+# paraphrases over 36 families), so a test artifact cannot quietly describe a
+# corpus shape that would fail the guards.
+CALIBRATION = CalibrationArtifact(
+    geometry=GEOMETRY,
+    embed_model_tag="test-model:v1",
+    corpus_hash="0000000000000000",
+    computed_at="2026-08-13T00:00:00+00:00",
+    background_pair_count=12192,
+    same_topic_pair_count=240,
+    bg_p50=0.60,
+    bg_p95=0.72,
+    bg_p99=0.75,
+    same_topic_p05=0.85,
+    same_topic_p50=0.90,
+)
 
 
 def candidate(
@@ -54,6 +83,13 @@ def candidate(
     )
 
 
+def rank(
+    candidates: list[CandidateInput], *, rerank_scores: dict[int, float] | None = None
+) -> list[ScoredCandidate]:
+    """Score against the test artifact. Calibration is required, never defaulted."""
+    return score_candidates(candidates, calibration=CALIBRATION, rerank_scores=rerank_scores)
+
+
 class TestConfigIsWhatTheseTestsAssume:
     def test_multipliers(self) -> None:
         outcome = CONFIG.graph_multiplier.outcome
@@ -62,9 +98,52 @@ class TestConfigIsWhatTheseTestsAssume:
         assert CONFIG.graph_multiplier.evidence_bonus == EVIDENCE
 
     def test_floor_and_weights(self) -> None:
-        assert CONFIG.retrieval.match_floor == FLOOR
+        assert CONFIG.retrieval.match_floor_calibrated == FLOOR
         assert CONFIG.final_score.weights.vector_graph == 0.5
         assert CONFIG.final_score.weights.rerank == 0.5
+
+    def test_the_old_raw_units_key_is_gone(self) -> None:
+        """Amendment L removed `match_floor` rather than aliasing it.
+
+        An alias would have kept every stale reference working while silently
+        resolving to the wrong units — which is the failure the rename exists to
+        end, not to preserve.
+        """
+        assert not hasattr(CONFIG.retrieval, "match_floor")
+
+
+class TestCalibrationIsRequired:
+    """Amendment J. The scorer used to accept `calibration=None` and fall back to
+    raw cosine, which made the floor fail OPEN: with no artifact the configured
+    value was compared against unmapped cosine, where every real score exceeded
+    it, so retrieval matched everything while reporting that a floor applied.
+    """
+
+    def test_score_candidates_refuses_without_an_artifact(self) -> None:
+        with pytest.raises(TypeError):
+            score_candidates([candidate(node="a", vector=0.8)])  # type: ignore[call-arg]
+
+    def test_there_is_no_raw_cosine_fallback(self) -> None:
+        """Passing None is a type error, not a request for the old behaviour."""
+        with pytest.raises((TypeError, AttributeError)):
+            score_candidates([candidate(node="a", vector=0.8)], calibration=None)  # type: ignore[arg-type]
+
+    def test_calibration_maps_raw_onto_the_measured_band(self) -> None:
+        """0.75 sits halfway between bg_p50 (0.60) and same_topic_p50 (0.90)."""
+        scored = rank([candidate(node="a", vector=0.75)])
+        assert scored[0].vector_score == pytest.approx(0.75)
+        assert scored[0].calibrated_similarity == pytest.approx(0.50)
+
+    def test_a_background_level_score_calibrates_to_zero(self) -> None:
+        """Raw 0.60 is the median unrelated question. It means nothing, so: 0."""
+        assert rank([candidate(node="a", vector=0.60)])[0].calibrated_similarity == pytest.approx(
+            0.0
+        )
+
+    def test_a_paraphrase_level_score_calibrates_to_one(self) -> None:
+        assert rank([candidate(node="a", vector=0.90)])[0].calibrated_similarity == pytest.approx(
+            1.0
+        )
 
 
 class TestRecency:
@@ -163,7 +242,7 @@ class TestOrderingProperties:
     """The properties the retrieval evals ultimately depend on."""
 
     def test_won_and_recent_beats_lost_and_stale_at_equal_similarity(self) -> None:
-        ranked = score_candidates(
+        ranked = rank(
             [
                 candidate(node="lost-stale", vector=0.80, outcome=Outcome.LOST, age_days=900),
                 candidate(node="won-recent", vector=0.80, outcome=Outcome.WON, age_days=30),
@@ -172,7 +251,7 @@ class TestOrderingProperties:
         assert [c.answer_node_id for c in ranked] == ["won-recent", "lost-stale"]
 
     def test_evidence_breaks_a_tie(self) -> None:
-        ranked = score_candidates(
+        ranked = rank(
             [
                 candidate(node="a-no-evidence", vector=0.7, outcome=Outcome.WON, age_days=100),
                 candidate(
@@ -187,23 +266,29 @@ class TestOrderingProperties:
         assert ranked[0].answer_node_id == "b-evidenced"
 
     def test_a_much_stronger_similarity_still_wins(self) -> None:
-        """The multiplier tilts ranking; it must not overturn it outright."""
-        ranked = score_candidates(
+        """Preference tilts ranking; it must not overturn it outright.
+
+        Both sit inside the calibrated band rather than against its clamps, so
+        this tests the arithmetic and not the clamping:
+
+            weak-but-won     raw 0.70 -> calibrated 0.3333
+            strong-but-lost  raw 0.82 -> calibrated 0.7333
+
+        The relevance ratio is 2.2, past the 1.733 boundary, so no preference
+        combination can invert them.
+        """
+        ranked = rank(
             [
-                candidate(node="weak-but-won", vector=0.40, outcome=Outcome.WON, age_days=0),
-                candidate(node="strong-but-lost", vector=0.95, outcome=Outcome.LOST, age_days=0),
+                candidate(node="weak-but-won", vector=0.70, outcome=Outcome.WON, age_days=0),
+                candidate(node="strong-but-lost", vector=0.82, outcome=Outcome.LOST, age_days=0),
             ]
         )
         assert ranked[0].answer_node_id == "strong-but-lost"
 
     def test_identical_candidates_break_ties_deterministically(self) -> None:
         """Otherwise the ranking depends on database return order."""
-        first = score_candidates(
-            [candidate(node="zzz", vector=0.7), candidate(node="aaa", vector=0.7)]
-        )
-        second = score_candidates(
-            [candidate(node="aaa", vector=0.7), candidate(node="zzz", vector=0.7)]
-        )
+        first = rank([candidate(node="zzz", vector=0.7), candidate(node="aaa", vector=0.7)])
+        second = rank([candidate(node="aaa", vector=0.7), candidate(node="zzz", vector=0.7)])
         assert (
             [c.answer_node_id for c in first]
             == [c.answer_node_id for c in second]
@@ -214,15 +299,17 @@ class TestOrderingProperties:
         )
 
     def test_scores_are_ranked_descending(self) -> None:
-        ranked = score_candidates(
+        """All three inside the band, so none is flattened by a clamp."""
+        ranked = rank(
             [
-                candidate(node="a", vector=0.30),
-                candidate(node="b", vector=0.90),
-                candidate(node="c", vector=0.60),
+                candidate(node="a", vector=0.65),
+                candidate(node="b", vector=0.88),
+                candidate(node="c", vector=0.75),
             ]
         )
         scores = [c.final_score for c in ranked]
         assert scores == sorted(scores, reverse=True)
+        assert [c.answer_node_id for c in ranked] == ["b", "c", "a"]
 
 
 class TestBlending:
@@ -247,25 +334,80 @@ class TestBlending:
         assert blend(vector_score=0.95, multiplier=1.2, rerank_score=1.0) == pytest.approx(1.0)
 
     def test_every_final_score_stays_in_range(self) -> None:
-        ranked = score_candidates(
+        """Both calibration clamps exercised: raw 1.0 saturates, raw 0.0 floors."""
+        ranked = rank(
             [
                 candidate(node="a", vector=1.0, outcome=Outcome.WON, age_days=0, evidence=True),
                 candidate(node="b", vector=0.0, outcome=Outcome.LOST, age_days=2000),
             ]
         )
         assert all(0.0 <= c.final_score <= 1.0 for c in ranked)
+        assert [c.calibrated_similarity for c in ranked] == [1.0, 0.0]
+
+    def test_the_full_chain_is_hand_computed(self) -> None:
+        """raw -> calibrated -> relevance -> preference -> final, end to end.
+
+        raw          0.85
+        calibrated   (0.85 - 0.60) / 0.30            = 0.833333
+        relevance    0.5 * 0.833333 + 0.5 * 0.60     = 0.716667
+        preference   1.15 * 1.1 * (0.90 + 0.10 * e^(-30/540))
+                     = 1.265 * 0.9945959             = 1.258164
+        final        0.716667 * 1.258164             = 0.901684
+        """
+        only = rank(
+            [candidate(node="a", vector=0.85, outcome=Outcome.WON, age_days=30, evidence=True)],
+            rerank_scores={0: 0.60},
+        )[0]
+        assert only.calibrated_similarity == pytest.approx(0.833333, abs=1e-6)
+        assert only.relevance == pytest.approx(0.716667, abs=1e-6)
+        assert only.preference == pytest.approx(1.258164, abs=1e-6)
+        assert only.final_score == pytest.approx(0.901684, abs=1e-6)
 
 
 class TestMatchFloor:
+    """The floor is judged on RELEVANCE, in CALIBRATED space.
+
+    Raw 0.75 calibrates to exactly 0.50, the configured floor. Under the old
+    raw-units comparison that same candidate would have cleared a 0.55 floor on
+    its raw score alone — which is the bug amendment L names: a floor that every
+    real cosine exceeds is not a floor.
+    """
+
+    #: The raw cosine that calibrates to exactly the configured floor:
+    #: 0.60 + 0.50 * 0.30 = 0.75.
+    AT_FLOOR = 0.75
+
     def test_exactly_at_the_floor_matches(self) -> None:
         """Inclusive, matching the RetrievalResult contract."""
-        scored = score_candidates([candidate(node="a", vector=FLOOR)])
-        assert scored[0].final_score == pytest.approx(FLOOR)
+        scored = rank([candidate(node="a", vector=self.AT_FLOOR)])
+        assert scored[0].relevance == pytest.approx(FLOOR)
         assert to_retrieval_result("q-1", scored).status is RetrievalStatus.MATCHED
 
     def test_just_below_the_floor_does_not(self) -> None:
-        scored = score_candidates([candidate(node="a", vector=FLOOR - 0.01)])
+        """Raw 0.747 -> calibrated 0.49, just under."""
+        scored = rank([candidate(node="a", vector=0.747)])
+        assert scored[0].relevance == pytest.approx(0.49)
         assert to_retrieval_result("q-1", scored).status is RetrievalStatus.NO_MATCH
+
+    def test_preference_cannot_rescue_a_below_floor_candidate(self) -> None:
+        """D17's invariant, at the floor rather than in the abstract.
+
+        A won, fresh, evidenced answer carries the maximum preference. It still
+        fails to qualify, because preference reorders and never gates.
+        """
+        scored = rank(
+            [candidate(node="a", vector=0.747, outcome=Outcome.WON, age_days=0, evidence=True)]
+        )
+        assert scored[0].preference > 1.0
+        assert scored[0].final_score > FLOOR
+        assert to_retrieval_result("q-1", scored).status is RetrievalStatus.NO_MATCH
+
+    def test_preference_cannot_doom_an_above_floor_candidate(self) -> None:
+        scored = rank(
+            [candidate(node="a", vector=self.AT_FLOOR, outcome=Outcome.LOST, age_days=100_000)]
+        )
+        assert scored[0].preference < 1.0
+        assert to_retrieval_result("q-1", scored).status is RetrievalStatus.MATCHED
 
     def test_no_candidates_is_no_match(self) -> None:
         result = to_retrieval_result("q-1", [])
@@ -274,46 +416,59 @@ class TestMatchFloor:
 
     def test_weak_candidates_are_still_returned_for_the_report(self) -> None:
         """NO_MATCH still shows what was considered, so it can be explained."""
-        scored = score_candidates(
-            [candidate(node="a", vector=0.3), candidate(node="b", vector=0.2)]
-        )
+        scored = rank([candidate(node="a", vector=0.65), candidate(node="b", vector=0.62)])
         result = to_retrieval_result("q-1", scored)
         assert result.status is RetrievalStatus.NO_MATCH
         assert len(result.candidates) == 2
 
+    def test_the_floor_recorded_on_the_result_is_the_calibrated_one(self) -> None:
+        """`floor_used` travels with the result so a verdict can be re-checked."""
+        result = to_retrieval_result("q-1", rank([candidate(node="a", vector=0.80)]))
+        assert result.floor_used == pytest.approx(CONFIG.retrieval.match_floor_calibrated)
+
 
 class TestRerankApplication:
     def test_scores_are_matched_by_position(self) -> None:
-        ranked = score_candidates(
-            [candidate(node="a", vector=0.5), candidate(node="b", vector=0.5)],
+        """Both raw 0.75 -> calibrated 0.50, so the rerank alone separates them:
+        a = 0.5*0.50 + 0.5*0.1 = 0.30, b = 0.5*0.50 + 0.5*0.9 = 0.70."""
+        ranked = rank(
+            [candidate(node="a", vector=0.75), candidate(node="b", vector=0.75)],
             rerank_scores={0: 0.1, 1: 0.9},
         )
         assert ranked[0].answer_node_id == "b"
         assert ranked[0].rerank_score == pytest.approx(0.9)
+        assert ranked[0].relevance == pytest.approx(0.70)
+        assert ranked[1].relevance == pytest.approx(0.30)
 
     def test_a_missing_position_falls_back_for_that_candidate(self) -> None:
-        ranked = score_candidates(
+        ranked = rank(
             [candidate(node="a", vector=0.8), candidate(node="b", vector=0.8)],
             rerank_scores={0: 0.2},
         )
         by_node = {c.answer_node_id: c for c in ranked}
         assert by_node["a"].rerank_score == pytest.approx(0.2)
         assert by_node["b"].rerank_score is None
+        # b keeps the full calibrated value; a is dragged down by its low rerank.
+        assert by_node["b"].relevance == pytest.approx(0.666667, abs=1e-6)
+        assert by_node["a"].relevance == pytest.approx(0.433333, abs=1e-6)
 
     def test_none_means_no_rerank_at_all(self) -> None:
-        ranked = score_candidates([candidate(node="a", vector=0.8)], rerank_scores=None)
+        """Raw 0.8 -> calibrated 0.6667; the rerank weight is redistributed."""
+        ranked = rank([candidate(node="a", vector=0.8)], rerank_scores=None)
         assert ranked[0].rerank_score is None
-        assert ranked[0].final_score == pytest.approx(0.8)
+        assert ranked[0].final_score == pytest.approx(0.666667, abs=1e-6)
 
     def test_the_decomposition_is_preserved_for_the_report(self) -> None:
         """A ranking must be explainable by pointing at arithmetic."""
-        ranked = score_candidates(
+        ranked = rank(
             [candidate(node="a", vector=0.8, outcome=Outcome.WON, age_days=0, evidence=True)],
             rerank_scores={0: 0.5},
         )
         only = ranked[0]
         assert only.vector_score == pytest.approx(0.8)
+        assert only.calibrated_similarity == pytest.approx(0.666667, abs=1e-6)
         assert only.graph_multiplier == pytest.approx(1.15 * 1.1)
+        assert only.preference == pytest.approx(1.15 * 1.1)
         assert only.rerank_score == pytest.approx(0.5)
         assert only.flags.outcome is Outcome.WON
         assert only.flags.recency_days == 0

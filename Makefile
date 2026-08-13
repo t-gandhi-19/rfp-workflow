@@ -146,12 +146,17 @@ define phase_gate
 	@exit 1
 endef
 
+PREFLIGHT_ENV = OLLAMA_BASE_URL_HOST=$${OLLAMA_BASE_URL_HOST:-http://localhost:11434} \
+                LITELLM_BASE_URL_HOST=$${LITELLM_BASE_URL_HOST:-http://localhost:$${LITELLM_PORT_HOST:-4000}}
+
 .PHONY: preflight
-preflight: check-env ## Verify the embedding path before anything writes to the graph
+preflight: check-env ## Verify the embedding path and that calibration is current
+	@set -a && source .env && set +a && $(PREFLIGHT_ENV) $(RUN) python -m scripts.preflight
+
+.PHONY: preflight-pre-ingest
+preflight-pre-ingest: check-env ## Preflight without the calibration check (nothing to calibrate yet)
 	@set -a && source .env && set +a && \
-		OLLAMA_BASE_URL_HOST=$${OLLAMA_BASE_URL_HOST:-http://localhost:11434} \
-		LITELLM_BASE_URL_HOST=$${LITELLM_BASE_URL_HOST:-http://localhost:$${LITELLM_PORT_HOST:-4000}} \
-		$(RUN) python -m scripts.preflight
+		$(PREFLIGHT_ENV) $(RUN) python -m scripts.preflight --skip-calibration
 
 .PHONY: apply-schema
 apply-schema: check-env ## Apply the Neo4j schema (idempotent)
@@ -173,13 +178,31 @@ validate-manual-key: ## Validate the hand-written answer key (structure + cross-
 manual-key-schema: ## Regenerate the manual answer key's JSON Schema from the model
 	$(RUN) python -m scripts.validate_manual_key --emit-schema
 
+.PHONY: calibrate
+calibrate: check-env ## Measure the retrieval calibration anchors and derive the match floor
+	@# Retrieval is fail-closed on the artifact this produces (amendment J), so
+	@# this is not an optional tuning step — without it nothing retrieves.
+	@set -a && source .env && set +a && \
+		$(PREFLIGHT_ENV) WRITE_API_PORT=$${WRITE_API_PORT:-8001} \
+		$(RUN) python -m scripts.calibrate
+
+.PHONY: calibrate-dry
+calibrate-dry: check-env ## Measure and print the anchors without writing anything
+	@set -a && source .env && set +a && \
+		$(PREFLIGHT_ENV) $(RUN) python -m scripts.calibrate --dry-run
+
 .PHONY: ingest
-ingest: preflight apply-schema ## Load synthetic fixtures into the graph (preflight first)
+ingest: preflight-pre-ingest apply-schema ## Load fixtures into the graph, then calibrate
+	@# Calibration runs LAST and is part of ingest rather than a step someone
+	@# remembers: the anchors are a property of the corpus, so a corpus that has
+	@# just changed has a calibration that no longer describes it.
 	@set -a && source .env && set +a && $(HOST_NEO4J) $(RUN) python -m scripts.ingest
+	@$(MAKE) --no-print-directory calibrate
 
 .PHONY: reembed
-reembed: preflight ## Recompute every embedding after an embedding-model change
+reembed: preflight-pre-ingest ## Recompute every embedding, then recalibrate
 	@set -a && source .env && set +a && $(HOST_NEO4J) $(RUN) python -m scripts.ingest --reembed
+	@$(MAKE) --no-print-directory calibrate
 
 .PHONY: evals
 evals: ## Run the eval harness with the config-default rerank setting (fast path)

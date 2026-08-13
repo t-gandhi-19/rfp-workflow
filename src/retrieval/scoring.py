@@ -174,8 +174,8 @@ def blend(
 def score_candidates(
     candidates: list[CandidateInput],
     *,
+    calibration: CalibrationArtifact,
     rerank_scores: dict[int, float] | None = None,
-    calibration: CalibrationArtifact | None = None,
     config: ScoringConfig | None = None,
 ) -> list[ScoredCandidate]:
     """Apply stages B and D to every candidate and rank the result.
@@ -184,6 +184,14 @@ def score_candidates(
     for this question at all — the weight redistribution in :func:`blend`
     applies uniformly, so candidates stay comparable with each other even though
     they are no longer comparable with a reranked question's scores.
+
+    **`calibration` is required (amendment J).** It used to default to None and
+    fall back to raw cosine, which made the whole mechanism fail OPEN: with no
+    artifact present the floor was silently compared against unmapped cosine, in
+    which the configured value was below every real score. Retrieval therefore
+    matched everything and reported that it had applied a floor. A guarantee
+    that degrades to nothing when its input is missing is worse than no
+    guarantee, because it still reads as one in the output.
     """
     resolved = config or scoring_config()
 
@@ -192,11 +200,7 @@ def score_candidates(
         # Raw cosine is not comparable across models or corpora; calibration maps
         # it onto a measured [0, 1] where 0 means "unrelated" and 1 means "as
         # close as a genuine paraphrase".
-        calibrated = (
-            calibration.calibrated(candidate.vector_score)
-            if calibration is not None
-            else candidate.vector_score
-        )
+        calibrated = calibration.calibrated(candidate.vector_score)
         rerank_score = None if rerank_scores is None else rerank_scores.get(index)
         candidate_relevance = relevance(
             calibrated_similarity=calibrated, rerank_score=rerank_score, config=resolved
@@ -247,11 +251,19 @@ def to_retrieval_result(
     NO_MATCH is a legitimate outcome, not a failure. It is what obliges the
     drafter to escalate rather than stretch a weak candidate into an answer, and
     the eval scores it at zero tolerance in both directions.
+
+    The floor is `match_floor_calibrated` and is compared against `relevance`,
+    which is in calibrated space. Amendment L renamed it from `match_floor` for
+    exactly that reason: the old name said nothing about units, and the value it
+    held (0.55) had been chosen for calibrated space while being compared
+    against raw cosine, where every real score exceeded it.
     """
     resolved = config or scoring_config()
     # D17: the floor is judged on relevance. Preference reorders what qualifies;
     # it never decides what qualifies.
-    floor = floor_override if floor_override is not None else resolved.retrieval.match_floor
+    floor = (
+        floor_override if floor_override is not None else resolved.retrieval.match_floor_calibrated
+    )
     cleared = [candidate for candidate in scored if candidate.relevance >= floor]
     return RetrievalResult(
         question_id=question_id,

@@ -12,6 +12,7 @@ this module to keep it that way.
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any
 
 from sqlalchemy import func
@@ -19,7 +20,14 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from src.contracts import DraftedAnswer, EvalScore, QuestionStatus, RunState
-from src.state.tables import drafts, eval_results, question_status, runs
+from src.retrieval.calibration import CalibrationArtifact
+from src.state.tables import (
+    calibration_artifacts,
+    drafts,
+    eval_results,
+    question_status,
+    runs,
+)
 
 
 async def _upsert(
@@ -107,6 +115,44 @@ async def upsert_draft(
             "written_by": written_by,
         },
         key=["run_id", "question_id"],
+    )
+
+
+async def upsert_calibration(
+    conn: AsyncConnection,
+    artifact: CalibrationArtifact,
+    *,
+    written_by: str,
+) -> None:
+    """Record the measured retrieval calibration.
+
+    Keyed on (model, corpus, geometry): re-measuring an unchanged model and
+    corpus overwrites, so the table states the current calibration rather than
+    logging every attempt to compute it.
+
+    `derived_floor` is stored rather than recomputed on read. The rule that
+    derives it may change; the number a given run actually judged against must
+    stay recoverable either way.
+    """
+    await _upsert(
+        conn,
+        calibration_artifacts,
+        {
+            "embed_model_tag": artifact.embed_model_tag,
+            "corpus_hash": artifact.corpus_hash,
+            "geometry": artifact.geometry,
+            "computed_at": datetime.fromisoformat(artifact.computed_at),
+            "background_pair_count": artifact.background_pair_count,
+            "same_topic_pair_count": artifact.same_topic_pair_count,
+            "bg_p50": artifact.bg_p50,
+            "bg_p95": artifact.bg_p95,
+            "bg_p99": artifact.bg_p99,
+            "same_topic_p05": artifact.same_topic_p05,
+            "same_topic_p50": artifact.same_topic_p50,
+            "derived_floor": artifact.derived_floor(),
+            "written_by": written_by,
+        },
+        key=["embed_model_tag", "corpus_hash", "geometry"],
     )
 
 

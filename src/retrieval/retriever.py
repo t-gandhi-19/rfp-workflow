@@ -29,6 +29,7 @@ from src.contracts.embedding import embedding_config
 from src.contracts.thresholds import ScoringConfig, scoring_config
 from src.gateway.client import GatewayClient, GatewayError
 from src.graph import queries
+from src.retrieval.calibration import CalibrationArtifact, load_for_current_corpus
 from src.retrieval.rerank import RerankOutcome, parse_rerank_response
 from src.retrieval.scoring import CandidateInput, score_candidates, to_retrieval_result
 
@@ -210,6 +211,7 @@ async def retrieve(
     question_text: str,
     embedding: list[float],
     requesting_customer: str,
+    calibration: CalibrationArtifact | None = None,
     domain: str = "cloud_migration",
     today: date | None = None,
     reranker: Reranker | None = None,
@@ -219,8 +221,15 @@ async def retrieve(
 
     Returns the result and a trace explaining it, because a ranking nobody can
     account for is a ranking nobody should act on.
+
+    `calibration` defaults to loading and verifying the artifact from disk. The
+    default is a LOAD, not a fallback: if the artifact is absent, or was measured
+    against a different embedding model or a different corpus, the load raises
+    and retrieval refuses to run. Amendment J — there is no path from here to a
+    ranking produced without calibration.
     """
     resolved = config or scoring_config()
+    artifact = calibration if calibration is not None else load_for_current_corpus()
     run_date = today or date.today()
     trace = RetrievalTrace(question_id=question_id)
 
@@ -240,7 +249,7 @@ async def retrieve(
 
     # Only the strongest few are worth a rerank call; ranking them by the
     # pre-rerank blend keeps the choice deterministic.
-    prelim = score_candidates(candidates, rerank_scores=None, config=resolved)
+    prelim = score_candidates(candidates, calibration=artifact, rerank_scores=None, config=resolved)
     order = {c.answer_node_id: i for i, c in enumerate(prelim)}
     candidates.sort(key=lambda c: order.get(c.answer_node_id, len(order)))
     survivors = candidates[: resolved.retrieval.rerank_top_n]
@@ -258,5 +267,7 @@ async def retrieve(
             trace.rerank_skip_reason = result.reason
             trace.notes.append(f"rerank not applied ({result.reason}); rerank weight redistributed")
 
-    scored = score_candidates(survivors, rerank_scores=rerank_scores, config=resolved)
+    scored = score_candidates(
+        survivors, calibration=artifact, rerank_scores=rerank_scores, config=resolved
+    )
     return to_retrieval_result(question_id, scored, config=resolved), trace

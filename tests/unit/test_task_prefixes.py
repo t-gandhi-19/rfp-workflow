@@ -97,21 +97,36 @@ class TestTheGatewayAppliesThem:
 
 
 class TestTheFakeEmbedderIsPrefixInsensitive:
-    """Documented choice: the CI stand-in strips prefixes before hashing.
+    """Documented choice: the CI stand-in strips prefixes before embedding.
 
     The real model embeds the two roles differently. If the stand-in did too, a
     CI query would never match its own corpus entry and the vector-index tests
-    would assert nothing. Stripping makes CI a clean plumbing oracle and claims
-    nothing about semantics.
+    would assert nothing. Stripping makes CI a clean plumbing oracle, and it
+    keeps the calibration geometry symmetric — a cross-prefix score in CI
+    measures token overlap and nothing else.
+
+    `role` is still required (amendment K). It is accepted and ignored, which is
+    not the same as being absent: the signature matching the real embedder's is
+    what stops a call site omitting it here and failing only in production.
     """
 
-    def test_both_roles_hash_identically(self) -> None:
-        document = fake_embedding("search_document: landing zones", 768)
-        query = fake_embedding("search_query: landing zones", 768)
+    def test_both_roles_embed_identically(self) -> None:
+        document = fake_embedding("search_document: landing zones", 768, role=EmbedRole.DOCUMENT)
+        query = fake_embedding("search_query: landing zones", 768, role=EmbedRole.QUERY)
         assert document == query
 
+    def test_the_role_argument_does_not_change_the_vector(self) -> None:
+        """Same text, both roles — the strip happens before anything else."""
+        assert fake_embedding("landing zones", 768, role=EmbedRole.QUERY) == fake_embedding(
+            "landing zones", 768, role=EmbedRole.DOCUMENT
+        )
+
     def test_it_still_matches_the_unprefixed_form(self) -> None:
-        assert fake_embedding("search_query: abc", 768) == fake_embedding("abc", 768)
+        assert fake_embedding("search_query: abc", 768, role=EmbedRole.QUERY) == fake_embedding(
+            "abc", 768, role=EmbedRole.DOCUMENT
+        )
 
     def test_different_texts_still_differ(self) -> None:
-        assert fake_embedding("search_query: a", 768) != fake_embedding("search_query: b", 768)
+        assert fake_embedding("search_query: a", 768, role=EmbedRole.QUERY) != fake_embedding(
+            "search_query: b", 768, role=EmbedRole.QUERY
+        )

@@ -38,10 +38,12 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from src.contracts.embedding import embedding_config
 from src.contracts.thresholds import ScoringConfig, scoring_config
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-CALIBRATION_PATH = REPO_ROOT / "fixtures" / "calibration.json"
+FIXTURES = REPO_ROOT / "fixtures"
+CALIBRATION_PATH = FIXTURES / "calibration.json"
 
 #: The only geometry these statistics are valid in.
 GEOMETRY = "query_x_document"
@@ -103,9 +105,16 @@ class CalibrationArtifact(BaseModel):
 
 
 def corpus_hash(pairs: list[dict[str, Any]]) -> str:
-    """Stable hash over the question texts and topic keys the stats came from."""
+    """Stable hash over the question texts and families the stats came from.
+
+    The FAMILY is hashed, not the topic key. The family is what partitions the
+    pairs into background and same-subject, so a regrouping that left every
+    question's text untouched would still move both distributions — and an
+    artifact whose hash did not notice would keep asserting statistics that no
+    longer describe the corpus.
+    """
     material = json.dumps(
-        sorted((p["question_id"], p["topic_key"], p["question"]) for p in pairs),
+        sorted((p["question_id"], p["topic_family"], p["question"]) for p in pairs),
         sort_keys=True,
     )
     return hashlib.sha256(material.encode()).hexdigest()[:16]
@@ -147,10 +156,25 @@ def compute(
             f"only {len(background)} cross-topic pairs; at least {minimum} are needed for "
             "stable percentiles. A corpus this small would give noise, not calibration."
         )
-    if not same_topic:
+
+    # The same-subject anchor is the fragile one. It is smaller than the
+    # background by two orders of magnitude, and a p05 over a handful of values
+    # is that handful's minimum wearing a percentile's name.
+    #
+    # This guard is not hypothetical. The corpus once grouped by `topic_key`,
+    # which is unique per record — so every group was a singleton and this
+    # population was EMPTY. Requiring merely "not empty" would have accepted the
+    # next version of that mistake: four supersession chains whose question text
+    # is byte-identical, giving eight pairs that measure exact duplicates rather
+    # than genuine paraphrases, and a floor derived from them sits above the
+    # real matches it is supposed to admit.
+    same_topic_minimum = resolved.calibration.min_same_topic_pairs
+    if len(same_topic) < same_topic_minimum:
         raise CalibrationError(
-            "no same-topic pairs — the corpus has no paraphrases or supersession chains, "
-            "so there is nothing to anchor 'genuinely the same question' against"
+            f"only {len(same_topic)} same-subject pairs; at least {same_topic_minimum} are "
+            "needed. The corpus does not contain enough differently-worded askings of the "
+            "same question to establish what a genuine match scores, so any floor derived "
+            "from it would be an artifact of the few pairs that exist."
         )
 
     background.sort()
@@ -174,10 +198,10 @@ def compute(
         same_topic_p50=statistics.median(same_topic),
     )
 
-    if artifact.separation < resolved.calibration.min_separation:
+    if artifact.separation < resolved.calibration.min_separation_raw:
         raise CalibrationError(
             f"separation {artifact.separation:.4f} is below the required "
-            f"{resolved.calibration.min_separation}: genuine matches (p05 "
+            f"{resolved.calibration.min_separation_raw}: genuine matches (p05 "
             f"{artifact.same_topic_p05:.4f}) barely clear unrelated ones (p99 "
             f"{artifact.bg_p99:.4f}). Retrieval cannot be trusted in this state."
         )
@@ -229,3 +253,47 @@ def load(
             f"now {expected_corpus_hash}. Run: make calibrate"
         )
     return artifact
+
+
+def calibration_corpus() -> list[dict[str, Any]]:
+    """Every question the statistics are measured over: corpus plus paraphrases.
+
+    Both populations are needed and they play different parts. The 40 corpus
+    questions supply the background — what "unrelated, but both about cloud
+    migration" scores. The paraphrases supply the same-subject anchor, which is
+    the only reason they exist.
+    """
+    rows: list[dict[str, Any]] = []
+    with (FIXTURES / "qa_pairs.json").open(encoding="utf-8") as handle:
+        for pair in json.load(handle):
+            rows.append(
+                {
+                    "question_id": pair["question_id"],
+                    "topic_family": pair["topic_family"],
+                    "question": pair["question"],
+                }
+            )
+    with (FIXTURES / "question_paraphrases.json").open(encoding="utf-8") as handle:
+        for row in json.load(handle):
+            rows.append(
+                {
+                    "question_id": row["question_id"],
+                    "topic_family": row["topic_family"],
+                    "question": row["question"],
+                }
+            )
+    return sorted(rows, key=lambda row: row["question_id"])
+
+
+def load_for_current_corpus(path: Path | None = None) -> CalibrationArtifact:
+    """Load the artifact and verify it still describes the corpus in the repo.
+
+    The single entry point retrieval uses. Both bindings are checked here rather
+    than left to the caller, because a caller that forgets one gets an artifact
+    that looks valid and is not.
+    """
+    return load(
+        path,
+        expected_model_tag=embedding_config().model.tag,
+        expected_corpus_hash=corpus_hash(calibration_corpus()),
+    )

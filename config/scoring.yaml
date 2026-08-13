@@ -11,9 +11,30 @@ retrieval:
   top_k: 20
   # How many survive into the single batched rerank call.
   rerank_top_n: 8
-  # No candidate at or above this final_score => NO_MATCH => the drafter must
+  # No candidate at or above this RELEVANCE => NO_MATCH => the drafter must
   # escalate rather than invent an answer.
-  match_floor: 0.55
+  #
+  # THE SUFFIX IS THE POINT (amendment L). This number lives in CALIBRATED space
+  # — the [0, 1] that src/retrieval/calibration.py maps raw cosine onto, where 0
+  # is "indistinguishable from an unrelated question" and 1 is "as close as a
+  # genuine paraphrase". It is NOT a cosine.
+  #
+  # It was called `match_floor` and held 0.55, a value chosen for calibrated
+  # space but compared against raw cosine, where nomic-embed-text puts every
+  # real score above 0.55. The floor was therefore unreachable from below and
+  # rejected nothing, while the config still read as though a floor applied. The
+  # old key is REMOVED rather than aliased, so a stale reference fails at config
+  # load instead of silently resolving to the wrong units.
+  #
+  # DERIVED, NOT CHOSEN. Recomputed by `make calibrate` per the midpoint rule in
+  # CalibrationArtifact.derived_floor: halfway between calibrated(bg_p99), the
+  # highest an unrelated question scores, and calibrated(same_topic_p05), the
+  # lowest a genuine match scores. Replacing this value by hand without the
+  # statistics that justify it is the thing the rename exists to prevent.
+  #
+  # STATUS: placeholder pending the first real-model `make calibrate`. The
+  # derivation, its geometry and its date are recorded here when it lands.
+  match_floor_calibrated: 0.50
 
 rerank:
   # Stage C: ONE batched call per question, scoring the surviving candidates
@@ -52,8 +73,15 @@ rerank:
   timeout_seconds: 300
 
 final_score:
-  # final_score = w_vector_graph * (vector_score * graph_multiplier)
-  #             + w_rerank      * rerank_score
+  # relevance = (w_vector_graph * calibrated_similarity + w_rerank * rerank_score)
+  #             / (w_vector_graph + w_rerank)
+  #
+  # Both terms are now on [0, 1] and mean comparable things: the first is a
+  # calibrated similarity, the second a model's 0-1 relevance opinion. Before
+  # calibration the first was raw cosine, which on this corpus never went below
+  # about 0.65 — so a 50/50 "average" was in fact an average of a compressed
+  # band and a full one, and the rerank dominated by construction. These weights
+  # only became meaningful once the left-hand term was normalised.
   #
   # When rerank.enabled is false, or a call fails for one question, the rerank
   # weight is redistributed onto vector_graph rather than treated as a zero
@@ -92,9 +120,22 @@ calibration:
   #
   # Guard against percentile noise on a small corpus.
   min_background_pairs: 500
+  # The same-subject anchor is the one most at risk of being computed from
+  # almost nothing: it is the smaller population by two orders of magnitude, and
+  # a p05 taken over a handful of values is that handful's minimum wearing a
+  # percentile's name. 40 topic families x 2 paraphrases yields 240 ordered
+  # same-subject pairs, so this leaves room for the corpus to shrink somewhat
+  # without letting it shrink to noise.
+  min_same_topic_pairs: 100
   # The same-topic p05 must clear the background p99 by at least this much, or
   # ingest fails loudly rather than retrieval failing quietly.
-  min_separation: 0.02
+  #
+  # RAW COSINE, not calibrated — the audit amendment L asked for turned this up
+  # as the one other similarity-anchored constant in this file. It is a gap
+  # between two raw percentiles, measured before any mapping exists, so it
+  # cannot be expressed in calibrated space: calibration is what the separation
+  # has to be sufficient to justify computing.
+  min_separation_raw: 0.02
 
 graph_multiplier:
   # Applied to vector_score before blending. Encodes what the graph knows that

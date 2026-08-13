@@ -49,6 +49,12 @@ def load_pairs() -> list[dict[str, Any]]:
     return sorted(data, key=lambda pair: pair["id"])
 
 
+def load_paraphrases() -> list[dict[str, Any]]:
+    with (FIXTURES / "question_paraphrases.json").open(encoding="utf-8") as handle:
+        data: list[dict[str, Any]] = json.load(handle)
+    return sorted(data, key=lambda row: row["id"])
+
+
 # ---------------------------------------------------------------------------
 # Cypher. Every statement is a MERGE on a natural key.
 # ---------------------------------------------------------------------------
@@ -150,6 +156,39 @@ MATCH (o:Outcome {value: row.outcome})
 MERGE (a)-[:RESULTED_IN]->(o)
 """
 
+# A paraphrase is an alternate PHRASING of an existing question, not a new Q&A
+# pair. It gets a Question node and points at the answer the original already
+# has, so the corpus still holds 40 answers and nothing new competes for a rank.
+#
+# It is ASKED_IN the SAME RFP as the question it rephrases, and that is load
+# bearing rather than tidy: `find_similar_questions` decides confidentiality by
+# walking (question)-[:ASKED_IN]->(:RFP)-[:ISSUED_BY]->(owner). A paraphrase of
+# the confidential question hung off a different customer's RFP would make the
+# confidential answer reachable through the paraphrase — a leak by way of a
+# synonym.
+MERGE_PARAPHRASES = """
+UNWIND $rows AS row
+MERGE (cust:Customer {name: row.customer})
+MERGE (rfp:RFP {id: row.rfp_id})
+MERGE (rfp)-[:ISSUED_BY]->(cust)
+MERGE (d:Domain {key: row.domain})
+MERGE (q:Question {id: row.question_id})
+  SET q.text = row.question, q.normalized_text = row.normalized_question,
+      q.domain = row.domain, q.question_type = row.question_type,
+      q.paraphrase_of = row.paraphrase_of
+MERGE (q)-[:ASKED_IN]->(rfp)
+MERGE (q)-[:BELONGS_TO]->(d)
+WITH q, row
+MATCH (cap:Capability {id: row.capability_id})
+MERGE (q)-[:BELONGS_TO]->(cap)
+WITH q, row
+MATCH (a:Answer {id: row.answer_id})
+MERGE (q)-[:ANSWERED_BY]->(a)
+WITH q, row
+MATCH (original:Question {id: row.paraphrase_of})
+MERGE (q)-[:PARAPHRASE_OF]->(original)
+"""
+
 MERGE_EVIDENCE = """
 UNWIND $rows AS row
 MATCH (a:Answer {id: row.answer_id})
@@ -188,7 +227,7 @@ async def _embed(texts: list[str]) -> list[list[float]]:
     """Embed through the gateway, or with the CI stand-in when opted in."""
     dimensions = embedding_config().model.dimensions
     if fake_embeddings_enabled():
-        return fake_embeddings(texts, dimensions)
+        return fake_embeddings(texts, dimensions, role=EmbedRole.DOCUMENT)
 
     client = GatewayClient.from_env()
     alias = embedding_config().model.alias
@@ -314,6 +353,28 @@ async def ingest_pairs(session: AsyncSession, pairs: list[dict[str, Any]]) -> No
         await session.run(MERGE_SUPERSESSION, rows=chains)
 
 
+async def ingest_paraphrases(session: AsyncSession, paraphrases: list[dict[str, Any]]) -> None:
+    """Alternate phrasings, attached to the answer their original already has."""
+    customers = {row["name"]: row["id"] for row in load_csv("customers.csv")}
+    rows = [
+        {
+            "rfp_id": f"HRFP-{customers[row['customer']]}",
+            "question_id": row["question_id"],
+            "question": row["question"],
+            "normalized_question": row["normalized_question"],
+            "domain": row["domain"],
+            "question_type": row["question_type"],
+            "capability_id": row["capability_id"],
+            "customer": row["customer"],
+            "answer_id": row["answer_id"],
+            "paraphrase_of": row["paraphrase_of"],
+        }
+        for row in paraphrases
+    ]
+    if rows:
+        await session.run(MERGE_PARAPHRASES, rows=rows)
+
+
 async def embed_questions(session: AsyncSession, *, force: bool) -> int:
     result = await session.run(QUESTIONS_TO_EMBED, force=force)
     pending = [record.data() async for record in result]
@@ -331,12 +392,14 @@ async def embed_questions(session: AsyncSession, *, force: bool) -> int:
 
 async def run(*, reembed_only: bool) -> int:
     pairs = load_pairs()
+    paraphrases = load_paraphrases()
     driver = get_driver()
     try:
         async with driver.session() as session:
             if not reembed_only:
                 await ingest_registry(session)
                 await ingest_pairs(session, pairs)
+                await ingest_paraphrases(session, paraphrases)
             embedded = await embed_questions(session, force=reembed_only)
             totals = await counts(session)
     finally:
@@ -356,6 +419,7 @@ async def run(*, reembed_only: bool) -> int:
             {
                 "mode": "reembed" if reembed_only else "ingest",
                 "pairs": len(pairs),
+                "paraphrases": len(paraphrases),
                 "questions_embedded": embedded,
                 "nodes": totals["nodes"],
                 "relationships": totals["relationships"],

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import csv
 import json
+import re
 from collections import Counter
 from pathlib import Path
 from typing import Any
@@ -25,6 +26,10 @@ from src.graph.driver import normalise_name
 
 FIXTURES = Path(__file__).resolve().parents[2] / "fixtures"
 REGISTRY = FIXTURES / "registry"
+
+#: Commercial content is process-only (build prompt §8). Shared by the corpus and
+#: paraphrase checks so one definition of "names a figure" governs both.
+PRICE = re.compile(r"(?:USD|EUR|GBP|INR|\$|€|£|₹)\s?\d|\bday rate\b", re.IGNORECASE)
 
 
 def _load_csv(name: str) -> list[dict[str, str]]:
@@ -40,6 +45,11 @@ def _load_json(name: str) -> Any:
 @pytest.fixture(scope="module")
 def pairs() -> list[dict[str, Any]]:
     return list(_load_json("qa_pairs.json"))
+
+
+@pytest.fixture(scope="module")
+def paraphrases() -> list[dict[str, Any]]:
+    return list(_load_json("question_paraphrases.json"))
 
 
 @pytest.fixture(scope="module")
@@ -210,6 +220,115 @@ class TestConfidentiality:
         assert bluepine[0]["confidential"] is True
 
 
+class TestTopicFamilies:
+    """`topic_key` identifies a record; `topic_family` names a subject.
+
+    Calibration groups on the family, so these two must not be allowed to
+    collapse into each other. They did once — every family was a singleton,
+    which left the calibration corpus with zero same-subject pairs and made the
+    anchor uncomputable.
+    """
+
+    def test_topic_keys_are_unique(self, pairs: list[dict[str, Any]]) -> None:
+        """The golden source joins to a corpus answer through this, so it is an id."""
+        keys = [p["topic_key"] for p in pairs]
+        assert len(set(keys)) == len(keys)
+
+    def test_exactly_four_families_hold_two_records(self, pairs: list[dict[str, Any]]) -> None:
+        """The four supersession chains, and nothing else."""
+        sizes = Counter(p["topic_family"] for p in pairs)
+        assert sorted(k for k, v in sizes.items() if v == 2) == [
+            "cutover-rollback",
+            "database-migration",
+            "iso-soc-scope",
+            "landing-zone",
+        ]
+        assert sum(1 for v in sizes.values() if v > 2) == 0
+
+    def test_a_family_of_two_is_exactly_a_supersession_chain(
+        self, pairs: list[dict[str, Any]]
+    ) -> None:
+        by_family: dict[str, list[dict[str, Any]]] = {}
+        for pair in pairs:
+            by_family.setdefault(pair["topic_family"], []).append(pair)
+        for family, members in by_family.items():
+            if len(members) == 1:
+                continue
+            chained = sum(1 for m in members if m["superseded_by"])
+            assert chained == 1, f"{family} has {len(members)} records but {chained} chain links"
+
+
+class TestParaphrases:
+    """Alternate phrasings exist so calibration has a real anchor.
+
+    Before them the corpus could only measure "the same question" on the four
+    supersession chains, whose question text is byte-identical — an anchor made
+    of exact duplicates, which puts the derived floor above genuine matches.
+    """
+
+    def test_two_per_family(
+        self, paraphrases: list[dict[str, Any]], pairs: list[dict[str, Any]]
+    ) -> None:
+        families = {p["topic_family"] for p in pairs}
+        counts = Counter(p["topic_family"] for p in paraphrases)
+        assert set(counts) == families
+        assert set(counts.values()) == {2}, (
+            "an uneven count would weight some subjects more heavily in the statistics"
+        )
+
+    def test_ids_are_unique(self, paraphrases: list[dict[str, Any]]) -> None:
+        for field in ("id", "question_id", "topic_key", "question"):
+            values = [p[field] for p in paraphrases]
+            assert len(set(values)) == len(values), f"duplicate {field}"
+
+    def test_none_restates_an_original_verbatim(
+        self, paraphrases: list[dict[str, Any]], pairs: list[dict[str, Any]]
+    ) -> None:
+        """A paraphrase that copies the original measures nothing."""
+        originals = {p["question"] for p in pairs}
+        assert not originals.intersection(p["question"] for p in paraphrases)
+
+    def test_each_carries_no_answer_of_its_own(
+        self, paraphrases: list[dict[str, Any]], pairs: list[dict[str, Any]]
+    ) -> None:
+        """The corpus still holds 40 answers, so nothing new competes for a rank."""
+        answers = {p["answer_id"] for p in pairs}
+        assert {p["answer_id"] for p in paraphrases} <= answers
+        assert all("answer" not in p for p in paraphrases)
+
+    def test_none_points_at_a_superseded_answer(
+        self, paraphrases: list[dict[str, Any]], pairs: list[dict[str, Any]]
+    ) -> None:
+        """Otherwise a phrasing's only match would be something retrieval suppresses."""
+        superseded = {p["answer_id"] for p in pairs if p["superseded_by"]}
+        assert not superseded.intersection(p["answer_id"] for p in paraphrases)
+
+    def test_paraphrase_of_names_a_real_question(
+        self, paraphrases: list[dict[str, Any]], pairs: list[dict[str, Any]]
+    ) -> None:
+        question_ids = {p["question_id"] for p in pairs}
+        assert {p["paraphrase_of"] for p in paraphrases} <= question_ids
+
+    def test_the_confidential_question_keeps_its_customer(
+        self, paraphrases: list[dict[str, Any]], pairs: list[dict[str, Any]]
+    ) -> None:
+        """The leak this would open is the whole reason the customer is carried.
+
+        `find_similar_questions` decides confidentiality by walking from the
+        question to the RFP that asked it. A paraphrase of the confidential
+        question hung off another customer's RFP would make ANS-0014 reachable
+        through a synonym.
+        """
+        confidential = next(p for p in pairs if p["confidential"])
+        rephrased = [p for p in paraphrases if p["answer_id"] == confidential["answer_id"]]
+        assert len(rephrased) == 2
+        assert all(p["customer"] == confidential["customer"] for p in rephrased)
+
+    def test_no_pricing_figure_appears(self, paraphrases: list[dict[str, Any]]) -> None:
+        for row in paraphrases:
+            assert not PRICE.search(row["question"]), f"{row['id']} names a figure"
+
+
 class TestGrounding:
     """Every entity named in a synthetic answer must resolve in the registry."""
 
@@ -249,10 +368,7 @@ class TestGrounding:
 
     def test_no_pricing_figure_anywhere_in_the_corpus(self, pairs: list[dict[str, Any]]) -> None:
         """Commercial topics are process-only (build prompt §8)."""
-        import re
-
-        currency = re.compile(r"(?:USD|EUR|GBP|INR|\$|€|£|₹)\s?\d|\bday rate\b", re.IGNORECASE)
-        offenders = [p["id"] for p in pairs if currency.search(p["answer"])]
+        offenders = [p["id"] for p in pairs if PRICE.search(p["answer"])]
         assert offenders == []
 
 

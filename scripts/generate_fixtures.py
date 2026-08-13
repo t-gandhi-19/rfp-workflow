@@ -40,9 +40,11 @@ from scripts.fixtures.corpus import (
     CLOSING_SENTENCES,
     EVIDENCE_SENTENCES,
     GOVERNANCE_SENTENCES,
+    PARAPHRASES,
     RISK_SENTENCES,
     TOPICS,
     Topic,
+    family_of,
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -235,6 +237,11 @@ def generate_qa_pairs() -> list[dict[str, Any]]:
                 "question_id": f"HQ-{index + 1:04d}",
                 "answer_id": f"ANS-{index + 1:04d}",
                 "topic_key": topic.key,
+                # The SUBJECT, as opposed to the record. `topic_key` is unique and
+                # is what the golden source joins through; `topic_family` groups
+                # the two halves of a supersession chain, and is what calibration
+                # means by "the same question".
+                "topic_family": family_of(topic),
                 "question": topic.question,
                 "answer": answer_text,
                 "domain": "cloud_migration",
@@ -275,6 +282,80 @@ def generate_qa_pairs() -> list[dict[str, Any]]:
             )
 
     return sorted(pairs, key=lambda p: p["id"])
+
+
+def generate_paraphrases(pairs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Alternate phrasings of existing corpus questions.
+
+    A paraphrase is a QUESTION, not a Q&A pair. It carries no answer of its own —
+    it points at the answer the original question already has, which is what
+    makes it safe to add: the corpus still holds 40 answers, so nothing new
+    competes for a ranking and the golden expectations are untouched.
+
+    They exist for calibration. The floor is derived from what "genuinely the
+    same question" scores, and before these the corpus had nothing to measure
+    that on: its only same-subject pairs were four supersession chains with
+    byte-identical question text.
+
+    Every family gets the same number of them, so no subject is weighted more
+    heavily than another in the resulting statistics.
+    """
+    families = sorted({pair["topic_family"] for pair in pairs})
+    missing = [family for family in families if family not in PARAPHRASES]
+    extra = sorted(set(PARAPHRASES) - set(families))
+    if missing or extra:
+        raise ValueError(
+            f"PARAPHRASES must cover exactly the topic families. "
+            f"Missing: {missing or 'none'}. Unknown: {extra or 'none'}."
+        )
+
+    counts = {len(value) for value in PARAPHRASES.values()}
+    if len(counts) != 1:
+        raise ValueError(
+            f"every family must supply the same number of paraphrases, got sizes {sorted(counts)}; "
+            "an uneven count would weight some subjects more heavily in the calibration statistics"
+        )
+
+    # The head of a family owns the paraphrases: for a supersession chain that is
+    # the v2, because a paraphrase pointing at a retired answer would put text in
+    # the index whose only match is something retrieval is supposed to suppress.
+    head_by_family: dict[str, dict[str, Any]] = {}
+    for pair in sorted(pairs, key=lambda p: p["id"]):
+        if pair["superseded_by"] is None:
+            head_by_family[pair["topic_family"]] = pair
+
+    rows: list[dict[str, Any]] = []
+    for family in families:
+        head = head_by_family[family]
+        for offset, text in enumerate(PARAPHRASES[family]):
+            index = len(rows) + 1
+            rows.append(
+                {
+                    "id": f"QP-{index:04d}",
+                    "question_id": f"HQP-{index:04d}",
+                    "topic_key": f"{family}-para-{offset + 1}",
+                    "topic_family": family,
+                    "paraphrase_of": head["question_id"],
+                    "answer_id": head["answer_id"],
+                    "question": text,
+                    "normalized_question": " ".join(text.split()),
+                    "domain": head["domain"],
+                    "question_type": head["question_type"],
+                    "capability_id": head["capability_id"],
+                    "customer": head["customer"],
+                }
+            )
+
+    seen = [row["question"] for row in rows]
+    if len(set(seen)) != len(seen):
+        raise ValueError("paraphrase question text must be unique across the corpus")
+    originals = {pair["question"] for pair in pairs}
+    collisions = sorted(originals.intersection(seen))
+    if collisions:
+        raise ValueError(
+            f"paraphrases must not restate an original question verbatim: {collisions}"
+        )
+    return sorted(rows, key=lambda r: r["id"])
 
 
 # ---------------------------------------------------------------------------
@@ -542,6 +623,7 @@ def generate(root: Path) -> dict[str, Any]:
     source = golden_source()
 
     write_json(root / "qa_pairs.json", pairs)
+    write_json(root / "question_paraphrases.json", generate_paraphrases(pairs))
     write_json(root / "golden_rfp_source.json", source)
     write_json(root / "answer_key.json", build_answer_key(pairs, source))
 
@@ -563,6 +645,7 @@ def check() -> int:
     """Regenerate into a temp directory and diff the byte-stable outputs."""
     stable = [
         "qa_pairs.json",
+        "question_paraphrases.json",
         "golden_rfp_source.json",
         "answer_key.json",
         "registry/vendors.csv",

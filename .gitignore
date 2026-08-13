@@ -6,6 +6,12 @@
 # Run artifacts
 out/
 
+# Measured calibration (amendment J). Machine-specific: it is bound to the
+# embedding model tag and the corpus hash it was measured against, and a
+# committed copy would be loaded on a machine whose model may differ. Produced
+# by `make calibrate`, which `make ingest` runs as its final step.
+fixtures/calibration.json
+
 # Python
 __pycache__/
 *.py[cod]

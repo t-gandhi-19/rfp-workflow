@@ -20,7 +20,7 @@ from typing import Any
 import pytest
 from neo4j import AsyncSession
 
-from src.contracts.embedding import embedding_config
+from src.contracts.embedding import EmbedRole, embedding_config
 from src.contracts.enums import EntityType, Outcome, RetrievalStatus  # noqa: F401
 from src.gateway.fake_embedder import fake_embedding
 from src.graph import queries
@@ -97,7 +97,7 @@ class TestVectorSearch:
 
     async def test_results_are_ordered_deterministically(self, session: AsyncSession) -> None:
         """Two identical queries must return the same order, or evals are noise."""
-        embedding = fake_embedding("deterministic ordering probe", 768)
+        embedding = fake_embedding("deterministic ordering probe", 768, role=EmbedRole.QUERY)
         first = await queries.find_similar_questions(
             session,
             embedding=embedding,
@@ -117,7 +117,7 @@ class TestVectorSearch:
     async def test_an_unknown_domain_returns_nothing(self, session: AsyncSession) -> None:
         hits = await queries.find_similar_questions(
             session,
-            embedding=fake_embedding("x", 768),
+            embedding=fake_embedding("x", 768, role=EmbedRole.QUERY),
             domain="payroll_services",
             requesting_customer=MERIDIAN,
             k=5,
@@ -140,7 +140,7 @@ class TestVectorSearch:
         with pytest.raises(ValueError, match="requesting_customer"):
             await queries.find_similar_questions(
                 session,
-                embedding=fake_embedding("x", 768),
+                embedding=fake_embedding("x", 768, role=EmbedRole.QUERY),
                 domain="cloud_migration",
                 requesting_customer="   ",
                 k=5,
@@ -368,7 +368,7 @@ class TestConfidentialityAtTheQueryBoundary:
         another customer's material would quietly come back short — fewer
         candidates, no error, worse answers.
         """
-        embedding = fake_embedding("landing zone guardrails", 768)
+        embedding = fake_embedding("landing zone guardrails", 768, role=EmbedRole.QUERY)
         hits = await queries.find_similar_questions(
             session,
             embedding=embedding,
