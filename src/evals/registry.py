@@ -21,8 +21,8 @@ from src.evals.contracts import CategoryResult, CategoryStatus
 
 
 class Category:
-    """Names for the six §3 categories. Strings, so a typo in one consumer
-    cannot silently create a seventh category nobody renders."""
+    """Names for the categories. Strings, so a typo in one consumer cannot
+    silently create a category nobody renders."""
 
     EXTRACTION = "extraction"
     RETRIEVAL = "retrieval"
@@ -30,6 +30,12 @@ class Category:
     COMPLIANCE = "compliance"
     QUALITY = "quality"
     ADVERSARIAL = "adversarial"
+    #: Phase 4. NOT one of the six §3 quality categories — it grades the RUN
+    #: rather than the answers, and it is here because cost per accepted answer
+    #: is the number that decides whether this workflow is worth operating, and
+    #: it had nowhere else to be reported. Named separately rather than folded
+    #: into another category so nobody reads a cost overrun as a quality failure.
+    OPERATIONAL = "operational"
 
 
 #: Every category, in report order. Extraction and retrieval first because they
@@ -42,27 +48,27 @@ ORDER: tuple[str, ...] = (
     Category.COMPLIANCE,
     Category.QUALITY,
     Category.ADVERSARIAL,
+    Category.OPERATIONAL,
 )
 
-#: Implemented in Phase 3. The rest are placeholders until the pipeline that
-#: produces their inputs exists.
-IMPLEMENTED: frozenset[str] = frozenset({Category.EXTRACTION, Category.RETRIEVAL})
+#: Phase 4 implemented the five that needed drafted output. QUALITY remains a
+#: placeholder in a run without judge-model — it is the only category that needs
+#: a third provider call per answer, and D16 puts the judge in eval runs only.
+IMPLEMENTED: frozenset[str] = frozenset(
+    {
+        Category.EXTRACTION,
+        Category.RETRIEVAL,
+        Category.GROUNDING,
+        Category.COMPLIANCE,
+        Category.ADVERSARIAL,
+        Category.OPERATIONAL,
+    }
+)
 
 #: Label and reason for each placeholder. The reason names the MISSING INPUT
 #: rather than saying "not done": what a category needs is a fact about the
 #: build order, and it tells a reader when to expect it.
 PLACEHOLDERS: dict[str, tuple[str, str]] = {
-    Category.GROUNDING: (
-        "Grounding — every claim traceable to a retrieved answer",
-        "Needs drafted prose to check claims against. The drafter is Phase 4; "
-        "the deterministic parts (entity existence, citation resolvability) are "
-        "already enforced by the graph queries this will call.",
-    ),
-    Category.COMPLIANCE: (
-        "Compliance — mandatory questions answered, word limits respected",
-        "Needs assembled responses. Word-limit and mandatory-coverage checks are "
-        "deterministic and run over the assembler's output, which is Phase 4.",
-    ),
     Category.QUALITY: (
         "Quality — LLM-judged, per D16",
         "Needs drafted prose and the judge-model. Per D16 this category is scored "
@@ -73,13 +79,6 @@ PLACEHOLDERS: dict[str, tuple[str, str]] = {
         "ids. The human spot-check sample and judge-vs-human agreement metric are "
         "deliberately NOT implemented — see D16, including its accepted risk that "
         "judge scores are uncalibrated against human opinion.",
-    ),
-    Category.ADVERSARIAL: (
-        "Adversarial — injection, leakage and refusal under attack",
-        "Needs the full pipeline to attack; the suite is Phase 5. The one "
-        "adversarial fact measurable today — that the planted injection on "
-        "question 1.4 is flagged by pattern, with no false positives — is "
-        "asserted inside the extraction category rather than claimed here.",
     ),
 }
 

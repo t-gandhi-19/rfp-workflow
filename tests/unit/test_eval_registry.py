@@ -35,7 +35,15 @@ SPECIFIED_BY_SECTION_3 = {
 
 class TestTheRegistryCoversTheSpec:
     def test_all_six_specified_categories_are_named(self) -> None:
-        assert set(ORDER) == SPECIFIED_BY_SECTION_3
+        assert set(ORDER) >= SPECIFIED_BY_SECTION_3
+
+    def test_operational_is_named_as_an_addition_not_a_seventh_quality_category(
+        self,
+    ) -> None:
+        """It grades the RUN, not the answers. Kept separate so a cost overrun
+        is never read as a quality failure."""
+        assert Category.OPERATIONAL not in SPECIFIED_BY_SECTION_3
+        assert Category.OPERATIONAL in ORDER
 
     def test_the_order_has_no_duplicates(self) -> None:
         assert len(ORDER) == len(set(ORDER))
@@ -48,8 +56,20 @@ class TestTheRegistryCoversTheSpec:
     def test_no_category_is_both_implemented_and_a_placeholder(self) -> None:
         assert not (IMPLEMENTED & set(PLACEHOLDERS))
 
-    def test_the_two_phase_3_categories_are_the_implemented_ones(self) -> None:
-        assert {Category.EXTRACTION, Category.RETRIEVAL} == IMPLEMENTED
+    def test_quality_is_the_only_remaining_placeholder(self) -> None:
+        """Phase 4 implemented the four that needed drafted output. Quality is
+        the one that ALSO needs a third provider call per answer, and D16 puts
+        judge-model in eval runs only — so a run without it reports quality as
+        unmeasured rather than as zero."""
+        assert set(PLACEHOLDERS) == {Category.QUALITY}
+
+    def test_the_answer_side_categories_are_implemented(self) -> None:
+        assert {
+            Category.GROUNDING,
+            Category.COMPLIANCE,
+            Category.ADVERSARIAL,
+            Category.OPERATIONAL,
+        } <= IMPLEMENTED
 
 
 class TestPlaceholdersCarryNoNumbers:

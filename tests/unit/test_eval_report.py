@@ -107,10 +107,18 @@ class TestEveryNumberCarriesItsJudgement:
 
 
 class TestUnimplementedCategories:
-    def test_all_four_placeholders_are_named(self) -> None:
+    def test_every_remaining_placeholder_is_named(self) -> None:
+        """Derived from the registry rather than hand-listed.
+
+        This test used to name four categories. Phase 4 implemented three of
+        them, and a hand-written list would have gone on asserting that
+        "Grounding" appears as a PLACEHOLDER long after it had become a
+        measurement — passing for the wrong reason, since the word appears in
+        the report either way.
+        """
         html = render([passing_category(), *all_placeholders()], context())
-        for label in ("Grounding", "Compliance", "Quality", "Adversarial"):
-            assert label in html
+        for result in all_placeholders():
+            assert result.label.split(" —")[0] in html
 
     def test_they_are_marked_not_implemented(self) -> None:
         html = render([passing_category(), *all_placeholders()], context())
