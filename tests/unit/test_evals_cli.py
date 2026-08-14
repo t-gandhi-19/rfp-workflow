@@ -86,6 +86,20 @@ class TestCategorySelection:
         assert "DESELECTED" in reason
         assert "not about the build" in reason
 
+    def test_it_says_what_still_covers_the_deselected_category(self) -> None:
+        """The label alone reads as a gap. It is not one.
+
+        Deselecting retrieval in CI costs no coverage: the machinery is proved by
+        the integration suite and by calibration's enforcing tiers, and the
+        semantic numbers are real-model numbers of record by design. A reader
+        meeting the greyed row in the report needs that in the report, not only
+        in the README.
+        """
+        reason = deselected(Category.RETRIEVAL).not_implemented_reason or ""
+        assert "integration suite" in reason
+        assert "both separation tiers enforcing" in reason
+        assert "number about a different thing" in reason
+
     @pytest.mark.parametrize("key", sorted(IMPLEMENTED))
     def test_every_implemented_category_can_be_deselected(self, key: str) -> None:
         assert deselected(key).not_implemented_reason

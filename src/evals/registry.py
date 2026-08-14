@@ -120,7 +120,13 @@ def deselected(key: str) -> CategoryResult:
         not_implemented_reason=(
             f"DESELECTED — the {key} category is implemented but was excluded from this "
             "run via --categories. This is a fact about the invocation, not about the "
-            "build. Run `make evals` with no selector to measure everything."
+            "build. Run `make evals` with no selector to measure everything. "
+            "Where CI deselects retrieval, no coverage is lost: the retrieval MACHINERY "
+            "is proved by the integration suite against a real graph and by calibration "
+            "running with both separation tiers enforcing, while retrieval's SEMANTIC "
+            "numbers are real-model numbers of record by design — a score computed over "
+            "stand-in vectors is not a weaker version of the real one, it is a number "
+            "about a different thing."
         ),
     )
 

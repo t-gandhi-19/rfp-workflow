@@ -624,6 +624,40 @@ disagrees. Fabricating fixtures to fill that gap would put invented data behind
 a number the report presents as measured, so the category is deselected and the
 gap is written down instead.
 
+#### Ruling: DESELECTED stands, and nothing is lost by it
+
+Deselecting the retrieval category costs CI **none of its actual coverage**, and
+saying so precisely matters more than the label:
+
+- **The retrieval machinery is proved in CI, through two other routes.** The
+  integration suite exercises the real query functions against a real Neo4j
+  holding the ingested corpus — vector search, the confidentiality filter,
+  supersession, paraphrase exclusion, the units agreement between calibration
+  and the index — and, since Phase 3, through the mcp-server tool boundary as
+  well. Separately, `make calibrate` runs with **both separation tiers
+  enforcing** against baselines CI commissions from its own vectors. What CI
+  cannot do is judge *semantic* retrieval quality.
+- **The retrieval category's numbers are real-model numbers of record, by
+  design.** This is the epistemic split this repo already applies everywhere
+  else, applied once more: *CI proves the machinery end to end; the real-model
+  run quoted in the PR proves the semantics.* A Recall@5 or a rank-1 accuracy
+  computed over vectors with no semantics is not a weaker version of the real
+  number — it is a number about a different thing, and publishing it in the same
+  column would invite exactly the substitution the split exists to forbid.
+
+So the label is not an apology. `DESELECTED` says the code exists and this
+invocation chose not to run it; `NOT_IMPLEMENTED` says the code does not exist.
+Only the first is true of retrieval in CI.
+
+**Named open question, for a fast-follow rather than this PR.** A deterministic
+CI recording set *is* feasible: the v3 stand-in embedder is a pure function of
+the fixtures, so CI's candidate sets are deterministic, and a record-mode run
+under the double could capture rerank replies that match CI's own candidate
+counts — with CI-labelled baselines, distinct from the commissioned ones. Worth
+doing only alongside a report label that keeps **CI-world numbers visually
+distinct from the numbers of record**; a stand-in Recall@5 sitting unmarked in
+the same table as a real one would undo the split this whole section defends.
+
 ## Changelog
 
 ### v0.1 — Phase 1: skeleton and contracts
