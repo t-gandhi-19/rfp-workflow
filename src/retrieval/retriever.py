@@ -29,6 +29,7 @@ from src.contracts.embedding import embedding_config
 from src.contracts.thresholds import ScoringConfig, scoring_config
 from src.gateway.client import GatewayClient, GatewayError
 from src.graph import queries
+from src.prompts import load_prompt
 from src.retrieval.calibration import CalibrationArtifact, load_for_current_corpus
 from src.retrieval.rerank import RerankOutcome, parse_rerank_response
 from src.retrieval.scoring import CandidateInput, score_candidates, to_retrieval_result
@@ -57,19 +58,22 @@ def _age_days(answer_date: str, *, today: date) -> int:
 
 
 def build_rerank_prompt(question: str, candidates: list[CandidateInput]) -> str:
-    """The Stage C prompt. Mirrors config/prompts/rerank.md version 1.
+    """The Stage C prompt, LOADED from config/prompts/rerank.md.
 
-    The recorded CI fixtures were captured against this exact shape; changing it
-    invalidates them, which is why the recordings carry the prompt version.
+    It used to be built here, with a docstring saying it "mirrors" that file —
+    two copies of one prompt kept in step by hand, with the version number
+    living in a comment. That is the drift CLAUDE.md rule 17 forbids, and
+    `tests/security/test_prompts_are_files.py` now makes the rule structural
+    rather than remembered.
+
+    The recorded CI fixtures were captured against this exact rendering, which
+    is why they carry the prompt version: bumping `version:` in the file is what
+    declares them stale.
     """
     listing = "\n".join(
         f"[{index}] {candidate.tier1_summary}" for index, candidate in enumerate(candidates)
     )
-    return (
-        "Score how relevant each candidate answer is to the question, 0.0 to 1.0.\n"
-        'Reply with JSON only: {"scores": [{"index": 0, "score": 0.0}, ...]}\n\n'
-        f"QUESTION: {question}\n\nCANDIDATES:\n{listing}\n"
-    )
+    return load_prompt("rerank").render(question=question, candidates=listing)
 
 
 class Reranker:
