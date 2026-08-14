@@ -143,6 +143,18 @@ class GuardrailSuite(Protocol):
     look like from the outside.
     """
 
+    def screen(self, question: ExtractedQuestion) -> GuardrailVerdict:
+        """Checks on the QUESTION, run before any model call for it.
+
+        Separate from `apply` because it asks a different thing at a different
+        time. The injection sanitizer judges the text a document supplied; there
+        is no answer yet to judge, and waiting until there is would spend a
+        rerank, a draft and a critique on a question already known to need a
+        human. Escalate-first: the cheapest correct escalation is the one made
+        before the budget is spent.
+        """
+        ...
+
     async def apply(
         self,
         *,
@@ -150,7 +162,9 @@ class GuardrailSuite(Protocol):
         answer: DraftedAnswer,
         selection: RetrieverSelection,
         document: RFPDocument,
-    ) -> GuardrailVerdict: ...
+    ) -> GuardrailVerdict:
+        """Checks on the ANSWER, run after the critic and before acceptance."""
+        ...
 
 
 @runtime_checkable

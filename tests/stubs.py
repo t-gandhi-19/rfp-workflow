@@ -278,9 +278,16 @@ class StubAgentLayer:
 class StubGuardrails:
     """Passes everything unless told otherwise."""
 
-    #: question_id -> the verdict to return.
+    #: question_id -> the post-draft verdict to return.
     verdicts: dict[str, GuardrailVerdict] = field(default_factory=dict)
+    #: question_id -> the pre-draft screening verdict to return.
+    screen_verdicts: dict[str, GuardrailVerdict] = field(default_factory=dict)
     seen: list[str] = field(default_factory=list)
+    screened: list[str] = field(default_factory=list)
+
+    def screen(self, question: ExtractedQuestion) -> GuardrailVerdict:
+        self.screened.append(question.id)
+        return self.screen_verdicts.get(question.id, GuardrailVerdict(passed=True))
 
     async def apply(
         self,

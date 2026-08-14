@@ -18,7 +18,13 @@ from src.contracts.checks import (
     ForbiddenContentHit,
     GuardrailVerdict,
 )
-from src.contracts.drafting import ConfidenceInputs, CritiqueResult, DraftedAnswer
+from src.contracts.drafting import (
+    ConfidenceInputs,
+    CritiqueResult,
+    DraftClaim,
+    DraftedAnswer,
+    DraftPayload,
+)
 from src.contracts.enums import (
     DocumentFormat,
     EntityType,
@@ -53,6 +59,8 @@ __all__ = [
     "CritiqueResult",
     "DocumentFormat",
     "DocumentSection",
+    "DraftClaim",
+    "DraftPayload",
     "DraftedAnswer",
     "EntityCheckResult",
     "EntityType",

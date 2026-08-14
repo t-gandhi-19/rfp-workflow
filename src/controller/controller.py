@@ -329,6 +329,21 @@ class RunController:
     ) -> QuestionOutcome:
         await self._set_status(state, question.id, QuestionStatus.PENDING)
 
+        # Escalate-first. A question the sanitizer has flagged is going to a
+        # human whatever the pipeline produces, so producing anything for it is
+        # spending a rerank, a draft and a critique to reach a conclusion
+        # already reached.
+        screened = self.guardrails.screen(question)
+        if not screened.passed:
+            assert screened.trigger is not None  # noqa: S101 - the contract guarantees it
+            return await self._escalated(
+                question,
+                state,
+                screened.trigger,
+                screened.reason or "",
+                detail=screened.detail,
+            )
+
         selection = await self.agents.retrieve(
             question,
             requesting_customer=document.customer_name,

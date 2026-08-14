@@ -7,6 +7,70 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from src.contracts.thresholds import confidence_escalation_threshold
 
 
+class DraftClaim(BaseModel):
+    """One assertion the draft makes, and the sources behind it.
+
+    The drafter decomposes its own answer into claims because THAT is what makes
+    coverage computable. Asking a model "how much of this is supported?" gets a
+    number; asking it "what did you assert, and from where?" gets a structure
+    arithmetic can be done on, and the arithmetic is ours (rule 3).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    text: str = Field(min_length=1)
+    #: Empty means the claim carries no citation — which is what makes it an
+    #: unsupported claim, and what drives coverage below 1.
+    source_ids: list[str] = Field(default_factory=list)
+
+    @property
+    def is_supported(self) -> bool:
+        return bool(self.source_ids)
+
+
+class DraftPayload(BaseModel):
+    """What the DRAFTER TASK returns — the model's half, and only its half.
+
+    THERE IS NO CONFIDENCE FIELD, and its absence is the design. Build prompt
+    §10: confidence is arithmetic over things already measured, never a model's
+    self-report. A model asked for a number will supply a fluent one, and it
+    would then be sitting next to the real one with nothing marking which is
+    which. Making the field impossible to return is stronger than a prompt
+    asking the model not to return it — which the prompt also does.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    question_id: str = Field(min_length=1)
+    answer_text: str
+    claims: list[DraftClaim] = Field(default_factory=list)
+    #: The drafter's own escalate-rather-than-invent decision. The controller
+    #: can only ever ADD to this — a guardrail or a low computed confidence
+    #: escalates an answer the drafter was happy with, never the reverse.
+    escalate: bool = False
+    escalation_reason: str | None = None
+
+    @property
+    def source_ids(self) -> list[str]:
+        """Every source cited by any claim, in first-seen order."""
+        seen: list[str] = []
+        for claim in self.claims:
+            for source_id in claim.source_ids:
+                if source_id not in seen:
+                    seen.append(source_id)
+        return seen
+
+    @property
+    def unsupported_claims(self) -> list[str]:
+        return [claim.text for claim in self.claims if not claim.is_supported]
+
+    @model_validator(mode="after")
+    def _an_escalation_says_why(self) -> DraftPayload:
+        if self.escalate and not (self.escalation_reason or "").strip():
+            raise ValueError("escalate=True requires a non-empty escalation_reason")
+        return self
+
+
 class ConfidenceInputs(BaseModel):
     """The measured terms `compute_confidence` combines.
 
