@@ -103,11 +103,15 @@ jobs:
           # parseable if it is ever added to the service list here.
           sed -i 's|^GROQ_API_KEY=$|GROQ_API_KEY=gsk-ci-placeholder|' .env
 
-      - name: Start postgres, keycloak, neo4j, write-api
+      # mcp-server joins the list in Phase 3. It is started HERE, before the
+      # schema and ingest steps, deliberately: it holds no schema and reads
+      # nothing at boot, so a container that cannot come up against an empty
+      # graph is a container with a startup dependency it should not have.
+      - name: Start postgres, keycloak, neo4j, write-api, mcp-server
         run: |
           set -a && source .env && set +a
           docker compose --profile infra --profile app up -d --wait \
-            postgres keycloak neo4j write-api
+            postgres keycloak neo4j write-api mcp-server
 
       - name: Show service status
         if: always()
@@ -224,6 +228,7 @@ jobs:
           set -a && source .env && set +a
           export KEYCLOAK_BASE=http://localhost:${KEYCLOAK_PORT_HOST:-8080}
           export WRITE_API_BASE=http://localhost:${WRITE_API_PORT:-8001}
+          export MCP_BASE=http://localhost:${MCP_PORT_HOST:-8002}
           export NEO4J_URI=bolt://localhost:${NEO4J_BOLT_PORT_HOST:-7687}
           # DECLARED, not worked around. The graph these tests run against was
           # ingested with the stand-in embedder two steps above, so the vectors

@@ -176,6 +176,7 @@ src/
   guardrails/ deterministic post-processors      (Phase 4)
   write_api/  the only write path to Postgres
   mcp_server/ role-gated tools over the graph    (Phase 3)
+  observability/ app logging that survives uvicorn (Phase 3)
   gateway/    the only module allowed a provider SDK
   evals/      harness — built before the agents  (Phase 3)
 fixtures/     synthetic registry, Q&A corpus, golden RFP, answer key
@@ -407,6 +408,66 @@ If `rank1_accuracy` ever fails **in the shipped configuration**, that is the
 observed failure that reopens the preference-span question, and it is escalated
 with the candidate pair.
 
+### The audit trail that was not there
+
+**Found by the first test that read the container's log instead of the source.**
+mcp-server logs the caller's subject, the tool and the outcome on every call —
+the record of who asked the graph for what, and the only after-the-fact evidence
+that a retrieval did or did not surface confidential material. In the running
+container, none of it was emitted.
+
+Uvicorn installs its own `dictConfig`, which attaches handlers to the `uvicorn*`
+loggers and leaves the ROOT logger bare. An application logger propagates to a
+root with no handlers, and Python's last-resort handler passes WARNING and above
+— so every `logger.info` in the codebase was discarded, silently, in exactly the
+environment it was written for.
+
+**Why nothing caught it.** A `caplog` test would have passed throughout, because
+pytest attaches its own root handler. The logging call was present and correct;
+the *handler wiring around it* was missing, and that wiring only exists in a
+deployed process. This is the general form of the case for asserting against the
+running service: in-process tests of configuration substitute their own
+configuration.
+
+**The fix** is `src/observability/logging.py` — one stdout handler on the `rfp`
+tree, attached from the service lifespan (not at import: uvicorn configures
+logging *after* importing the app). The split is deliberate:
+`tests/unit/test_app_logging.py` asserts the wiring properties, and
+`TestTheCallerIsInTheLog` in the integration suite asserts the container's own
+log actually contains `subject=`. Neither substitutes for the other.
+
+**A skip nearly hid it a second time.** That integration test skipped on the
+build host, where the Linux `docker` shim on the WSL PATH exits non-zero without
+Docker Desktop's WSL integration. Resolving `docker.exe` first — the name that
+answers there, and one that does not exist on a Linux runner — turned the skip
+into a run. A skipped assertion is an unverified claim, and this was the only
+assertion that the audit trail existed at all.
+
+### Working rules, earned and adopted
+
+Two rules generalised out of the amendment-S fallout at `b555ea6`. Both are
+stated as one-liners because both are cheap to apply and expensive to relearn.
+
+**Declarations, not workarounds.** *A test environment declares its stand-ins;
+a call site that hardcodes the stand-in hides the missing declaration.* CI's
+integration job ingested its graph with the stand-in embedder and then never
+said so, because every existing test called `fake_embedding(...)` directly
+instead of asking the environment. The gap was structurally invisible: no test
+that hardcodes the answer can notice the question was never asked. The fix
+exports `RFP_FAKE_EMBEDDINGS=1` — not to silence a failure, but to make the
+environment state a fact that was already true of the data. The test for
+"is this a workaround?" is whether the declaration would still be correct if
+the failing test did not exist.
+
+**One test, one question.** *A test that can fail for two reasons reports
+neither.* The first probe-agreement test re-embedded the corpus for its direct
+path, so it asked the units question *and* "does the query embedder match the
+one the graph was built with" — two real failure modes sharing one message.
+Reading document vectors from the graph for both paths leaves direct dot
+product versus index score as the only difference, which is the single thing
+amendment S is about. Splitting is not test-count vanity: it is what makes a
+red test a diagnosis instead of a starting point.
+
 ## Testing
 
 ```bash
@@ -418,8 +479,8 @@ pytest -m integration           # requires `make up`
 
 CI runs on every push: ruff → mypy → unit and security tests → gitleaks → a
 compose smoke job that brings up the stack, applies migrations, and exercises a
-real client-credentials token against write-api (expecting 200, 401, and 403 in
-the right places).
+real client-credentials token against write-api and mcp-server (expecting 200,
+401, and 403 in the right places).
 
 ### What CI proves, and what it does not
 

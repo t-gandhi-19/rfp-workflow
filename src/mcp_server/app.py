@@ -34,6 +34,7 @@ from pydantic import BaseModel, ConfigDict, ValidationError
 
 from src.graph.driver import close_driver, get_driver
 from src.mcp_server.tools import KG_READER, TOOLS, TOOLS_BY_NAME, ToolSpec
+from src.observability.logging import configure_app_logging
 from src.write_api.auth import Principal, build_verifier, require_role
 from src.write_api.settings import get_settings
 
@@ -48,6 +49,11 @@ class ToolManifest(BaseModel):
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    # Before anything else: uvicorn leaves the root logger bare, so without this
+    # every per-call audit line below is discarded in the container. See
+    # src/observability/logging.py — this is the fix for a real, found defect,
+    # not a precaution.
+    configure_app_logging()
     app.state.verifier = build_verifier()
     app.state.settings = get_settings()
     yield

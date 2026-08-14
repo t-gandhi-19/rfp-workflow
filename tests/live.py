@@ -32,6 +32,10 @@ def write_api_base() -> str:
     return os.environ.get("WRITE_API_BASE", "http://localhost:8001")
 
 
+def mcp_base() -> str:
+    return os.environ.get("MCP_BASE", "http://localhost:8002")
+
+
 def neo4j_bolt() -> tuple[str, int]:
     host = os.environ.get("NEO4J_HOST", "localhost")
     port = int(os.environ.get("NEO4J_BOLT_PORT_HOST", "7687"))
@@ -120,3 +124,25 @@ def require_write_api_and_keycloak() -> None:
 def require_neo4j() -> None:
     host, port = neo4j_bolt()
     require(tcp_open("Neo4j Bolt", host, port))
+
+
+#: Secrets the mcp-server integration tests authenticate with. `retriever-sa` is
+#: the caller under test; `extractor-sa` is the one deliberately without
+#: `kg-reader`, which is what makes the 403 assertion mean anything.
+MCP_SECRETS = ("RETRIEVER_SA_SECRET", "EXTRACTOR_SA_SECRET")
+
+
+def require_mcp_server() -> None:
+    """mcp-server, plus the Keycloak that issues its tokens and the Neo4j behind it.
+
+    All three, because a tool call exercises all three and a skip that named only
+    one would send the reader to the wrong service. mcp-server's /health does not
+    touch the graph — it deliberately reports the process, not its dependencies —
+    so Neo4j is probed separately rather than inferred from a 200.
+    """
+    require(
+        http_ok("Keycloak", f"{keycloak_base()}/realms/rfp/.well-known/openid-configuration"),
+        http_ok("mcp-server", f"{mcp_base()}/health"),
+        tcp_open("Neo4j Bolt", *neo4j_bolt()),
+    )
+    require_env(*MCP_SECRETS)
