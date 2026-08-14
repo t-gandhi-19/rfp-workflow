@@ -30,6 +30,31 @@ from __future__ import annotations
 import os
 from typing import Any
 
+# ---------------------------------------------------------------------------
+# BEFORE `import crewai`, AND THAT ORDER IS THE POINT.
+#
+# crewAI ships telemetry that is ON by default and exports spans — crew and task
+# metadata among them — to an endpoint outside this system. It is initialised
+# when the package is imported, so an opt-out set afterwards is an opt-out set
+# too late.
+#
+# This is not a model call, so the rule-5 AST guard cannot see it and the
+# LiteLLM proxy does not front it. It is nonetheless unreviewed egress from a
+# dependency, which is the same class of liability as the framework's retry
+# defaults: adopting a framework means auditing what it does that costs
+# something, not only what its names suggest.
+#
+# `OTEL_SDK_DISABLED` would also work and is DELIBERATELY NOT USED: it would
+# disable OUR OpenTelemetry SDK too, silently taking the §19 span topology with
+# it. Two crewAI-specific switches, so the blast radius is crewAI's telemetry
+# and nothing else.
+#
+# Set with `setdefault`, so an operator who genuinely wants it on can say so in
+# the environment rather than editing source.
+# ---------------------------------------------------------------------------
+os.environ.setdefault("CREWAI_DISABLE_TELEMETRY", "true")
+os.environ.setdefault("CREWAI_DISABLE_TRACKING", "true")
+
 from crewai import LLM, Agent, Crew, Process, Task
 from pydantic import BaseModel
 

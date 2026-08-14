@@ -220,7 +220,7 @@ thing already does.
 | 1 | `v0.1` | Skeleton, contracts, migrations, identity, CI gates |
 | 2 | `v0.2` | Graph schema and queries, synthetic corpus, golden RFP, extraction |
 | 3 | `v0.3` | Scoring, confidence, tiered MCP tools, full eval harness |
-| 4 | `v0.4` | Agents, controller, guardrails, assembler, observability |
+| 4 | `v0.4` | Agents, controller, guardrails, assembler, observability — **untagged: 1h outstanding, see D20** |
 | 5 | `v0.5` | Adversarial suite, cost and latency reporting, `make demo` |
 | 6 | `v0.6` | Streamlit trust dashboard, log interpreter, audit wiring |
 
@@ -259,6 +259,52 @@ touch the pipeline's human review stage, the SME escalation path, the
 no-auto-submission rule, or the never-granted `submitter` role — those remain
 CLAUDE.md golden rules and are unaffected. Human review is still the terminal
 stage of every run.
+
+### D20 — Phase 4 ships without its numbers of record
+
+**Decision.** Phase 4 is opened for review with 1a–1g complete and **1h
+outstanding**: no `make demo`, and no measured grounding, quality, adversarial or
+operational numbers. The reason is a missing credential, not a missing
+implementation.
+
+**The evidence, generated rather than asserted.** `GROQ_API_KEY` in the local
+`.env` is a placeholder — 30 characters, prefix `gsk-`; a real Groq key is `gsk_`
+and roughly twice that. Probed through the proxy, three times across two
+sessions:
+
+```
+drafter-model -> HTTP 400 : GroqException — {"message":"Invalid API Key","code":"invalid_api_key"}
+critic-model  -> HTTP 400 : GroqException — {"message":"Invalid API Key","code":"invalid_api_key"}
+judge-model   -> HTTP 400 : GroqException — {"message":"Invalid API Key","code":"invalid_api_key"}
+triage-model  -> HTTP 200 : ollama/llama3.2:3b
+```
+
+The local tier answers. The `.env` mtime predates the session in which the key
+was reported placed, and the LiteLLM container holds the same 30-character
+value, so this is not a stale-container artefact.
+
+**What this blocks, precisely.** The drafter and critic are Groq-only, so no
+answer can be produced; and every outstanding deliverable descends from a
+produced answer — the filled response template, the eval report's real numbers,
+the adversarial table's rows, cost per accepted answer, judge-scored quality.
+
+**What it does not block, and why the phase is still reviewable.** Everything
+deterministic is built and tested: the controller, its budgets, kill-and-resume
+proved byte-identical against real Postgres, the guardrails, the compliance
+checker, the assembler, the MCP write surface, the span topology, and all five
+answer-side eval categories unit-tested against synthetic completed runs. The
+local model tier runs. The dead-dependency run above is evidence about the
+system's behaviour, not a substitute for the numbers.
+
+**Accepted risk, stated plainly.** No answer this system produces has ever been
+judged. The zero-tolerance evals are code that has never scored a real drafter,
+so the phase proves they are *correct about synthetic input*, not that the
+pipeline passes them. Whoever supplies a key should expect the first real run to
+find things, and should treat that as the point of running it.
+
+**Not negotiable in the meantime.** Nothing was relaxed, stubbed or recorded to
+manufacture a passing number. There is no fixture standing in for a drafted
+answer anywhere in the eval path.
 
 ### D19 addendum / amendment S — self-consistency is not agreement
 
@@ -512,6 +558,42 @@ unit+security form of it — the form habitually run — is green on that same
 checkout, because the failure needs the integration suite and an unloaded
 environment at once.
 
+### Phase 4 — what a dead dependency proved, and three defects it found
+
+**The dead-dependency run is a RESULT, not a failure.** With the Groq tier
+returning `Invalid API Key`, the pipeline was run against the golden RFP anyway.
+It reached `drafting`, spent 829 real triage tokens on the local tier, escalated
+every question cleanly, and did not halt. That is the blast-radius design
+behaving exactly as specified under a dependency that is simply gone: one
+question failing escalates that question, and a drafter that fails on all of them
+escalates all of them. Graceful degradation to full escalation, observed rather
+than asserted.
+
+It is not a demo, and the run produced no answers — which is why `make demo` and
+the numbers of record remain outstanding (D20).
+
+**Three defects surfaced on the first real invocation, none of which the suite
+could see.** All three are the same family as the make-wiring and
+gitignored-reads scanners: green everywhere, broken somewhere nothing executes.
+
+1. `scripts/run.py` imported `configure_logging`, a name the module does not
+   export. 1685 unit tests, 124 integration tests, ruff and mypy all green —
+   mypy does not cover `scripts/`, and nothing imported it. It failed after the
+   stack was up and the graph ingested, which is the worst place for an
+   `ImportError` to appear. `tests/unit/test_scripts_import.py` now imports every
+   script module, derived from the directory so a new script is covered the day
+   it lands.
+2. **The error path was not itself protected.** `_escalated` performs I/O and is
+   called from inside an `except` block, where a second failure is not caught by
+   the handler already running. A dropped write-api connection during an
+   escalation propagated out of the fan-out and killed a run that had already
+   survived the error being escalated. It now halts as `halted(infra)` through
+   the halt path, with everything already written preserved.
+3. That drop is now retried **once, and only for `TransportError`** — a 4xx is a
+   refusal that will be refused again. Re-sending is safe because every write is
+   an idempotent upsert on a natural key, which is the same property `make
+   resume` rests on.
+
 ### Working rules, earned and adopted
 
 Two rules generalised out of the amendment-S fallout at `b555ea6`. Both are
@@ -527,6 +609,37 @@ exports `RFP_FAKE_EMBEDDINGS=1` — not to silence a failure, but to make the
 environment state a fact that was already true of the data. The test for
 "is this a workaround?" is whether the declaration would still be correct if
 the failing test did not exist.
+
+**Framework defaults are budget liabilities until proven counted.** *A ceiling
+the controller enforces is only a ceiling if nothing underneath it can spend
+without asking.* crewAI's `Task.guardrail_max_retries` defaults to **3**: a task
+whose output failed validation would have been re-issued three times by the
+framework, three model calls the ledger never sees, against the hard budget rule
+14 says the controller must not delegate. It is disabled by construction in
+`src/agents/crew.py`, and the test asserts **both** our `0` and the framework's
+`3`, so a future version changing the default says so rather than quietly making
+our setting a no-op nobody re-reads. The same reasoning disabled `max_iter`,
+`max_retry_limit` and both caches. Adopting a framework means auditing every
+default that can cost money, not the ones whose names suggest they might.
+
+The rule generalises past money. crewAI also ships **telemetry that is on by
+default**, exporting crew and task metadata to an endpoint outside this system —
+unreviewed egress the rule-5 AST guard cannot see, because it is not a model
+call and the proxy does not front it. It is opted out of *before* `import
+crewai`, since crewAI initialises telemetry at import and an opt-out set
+afterwards is set too late. Deliberately **not** via `OTEL_SDK_DISABLED`, which
+would work and would silently take the §19 span topology with it; two
+crewAI-specific switches keep the blast radius where it belongs. The only
+visible symptom had been a `Failed to export span batch` line at the end of every
+test run — a piece of noise that turned out to be the one observable trace of an
+outbound connection nobody had reviewed.
+
+**Every entry point is imported by a test.** *An import is the cheapest possible
+assertion and it catches a whole class.* See the Phase 4 findings above: a
+renamed helper broke `make run` while 1685 tests stayed green, because nothing
+imported the module that named it. This does not prove a script works — the
+make-wiring assertions and a real run are for that — it proves the module is
+well-formed, which is the failure that costs the most to discover late.
 
 **One test, one question.** *A test that can fail for two reasons reports
 neither.* The first probe-agreement test re-embedded the corpus for its direct
@@ -548,10 +661,18 @@ measured category fails, so it can gate.
 |---|---|---|
 | extraction | implemented | `fixtures/answer_key_manual.json` — externally authored, builder-immutable |
 | retrieval | implemented | the hand-written key, over the twenty golden questions |
-| grounding | NOT_IMPLEMENTED | needs drafted prose (Phase 4) |
-| compliance | NOT_IMPLEMENTED | needs assembled responses (Phase 4) |
-| quality | NOT_IMPLEMENTED | needs the drafter and `judge-model` (Phase 4, per D16) |
-| adversarial | NOT_IMPLEMENTED | needs the full pipeline to attack (Phase 5) |
+| grounding | implemented | citations against what the retriever SELECTED, not against the graph |
+| compliance | implemented | the assembler's output and the domain policy |
+| quality | implemented, **unmeasured to date** | `judge-model`, per D16 — needs a Groq credential, see D20 |
+| adversarial | implemented, **unmeasured to date** | one row per planted trap, each naming its required trigger |
+| operational | implemented, **unmeasured to date** | cost per run / question / ACCEPTED answer, latency per stage |
+
+**"Implemented" and "measured" are different words here, and Phase 4 ended with
+them apart.** The five answer-side categories are built and unit-tested against
+synthetic completed runs; none has yet scored a real one, because the drafter and
+critic are Groq-backed and this machine has no valid Groq key (D20). The report
+renders `quality` as a placeholder in any run with no judged answers, which is
+the honest state rather than a zero.
 
 Unimplemented categories are **named and greyed in the report, never omitted**,
 each stating the input it waits on. A category simply absent reads as "nothing to

@@ -15,8 +15,13 @@ fails here rather than in a run nobody audits.
 
 from __future__ import annotations
 
+import inspect
+import os
+from pathlib import Path
+
 import pytest
 
+from src.agents import crew as crew_module
 from src.agents.crew import PROXY_PREFIX, AgentWiringError, build_agent, build_crew, build_task
 from src.contracts import CritiqueResult, DraftPayload, TriageResult
 from src.prompts import Prompt, load_prompt
@@ -38,6 +43,48 @@ def crew_for(name: str, model: type):  # type: ignore[no-untyped-def]
     agent, _ = agent_for(name)
     task = build_task(description="d", expected_output="e", agent=agent, output_model=model)
     return build_crew(agent=agent, task=task), agent, task
+
+
+class TestTheFrameworksOwnTelemetryIsOff:
+    """crewAI exports crew and task metadata to its own endpoint by default.
+
+    Not a model call, so the rule-5 AST guard cannot see it and the proxy does
+    not front it — but unreviewed egress from a dependency all the same. Found
+    because it printed `Failed to export span batch` at the end of every test
+    run: the noise was the only visible symptom of an outbound connection
+    nobody had reviewed.
+    """
+
+    def test_the_opt_out_is_set(self) -> None:
+        import src.agents.crew  # noqa: F401 - imported for its module-level effect
+
+        assert os.environ.get("CREWAI_DISABLE_TELEMETRY") == "true"
+        assert os.environ.get("CREWAI_DISABLE_TRACKING") == "true"
+
+    def test_it_is_set_before_crewai_is_imported(self) -> None:
+        """An opt-out set after the import is an opt-out set too late: crewAI
+        initialises telemetry at import. Asserted on the SOURCE, because by the
+        time this test runs the import has already happened and the ordering
+        cannot be observed any other way.
+        """
+        source = Path(inspect.getfile(crew_module)).read_text(encoding="utf-8")
+        opt_out = source.index("CREWAI_DISABLE_TELEMETRY")
+        crewai_import = source.index("from crewai import")
+        assert opt_out < crewai_import, (
+            "the telemetry opt-out must precede `from crewai import ...`; "
+            "crewAI initialises telemetry when the package is imported"
+        )
+
+    def test_our_own_otel_sdk_is_not_disabled(self) -> None:
+        """`OTEL_SDK_DISABLED=true` would also switch off crewAI's telemetry —
+        and would silently take the §19 span topology with it. The two
+        crewAI-specific switches keep the blast radius where it belongs."""
+        assert os.environ.get("OTEL_SDK_DISABLED", "false").lower() != "true"
+
+    def test_an_operator_can_turn_it_back_on(self) -> None:
+        """`setdefault`, not assignment: the environment wins over source."""
+        source = Path(inspect.getfile(crew_module)).read_text(encoding="utf-8")
+        assert 'os.environ.setdefault("CREWAI_DISABLE_TELEMETRY"' in source
 
 
 class TestEveryCallLeavesThroughTheProxy:
