@@ -155,7 +155,9 @@ responses, so the quality gates are deterministic and free.
 | `make ingest` | Fixtures → graph (Phase 2) |
 | `make run FILE=...` | Run one RFP (Phase 4) |
 | `make resume RUN=...` | Resume an interrupted run (Phase 4) |
-| `make evals` | Eval harness + HTML report (Phase 3) |
+| `make evals` | Eval harness + HTML report → `out/evals.html` |
+| `make evals-full` | Same, rerank FORCED ON — the numbers of record |
+| `make evals-ablation` | Retrieval twice, rerank on and off, with deltas |
 | `make reembed` | Re-embed the corpus after a model change (Phase 2) |
 | `make explain RUN=...` | Plain-English run narrative (Phase 6) |
 | `make demo` | End-to-end on the golden RFP (Phase 5) |
@@ -443,6 +445,39 @@ answers there, and one that does not exist on a Linux runner — turned the skip
 into a run. A skipped assertion is an unverified claim, and this was the only
 assertion that the audit trail existed at all.
 
+### Two defects the eval harness found in itself
+
+Both were in the scoreboard rather than in a measurement, and both would have
+degraded quietly rather than failed loudly. Recorded because the shape recurs:
+*the code that records results is not covered by the results it records.*
+
+**`GIT_SHA` answered the wrong question.** The harness keyed every local run to
+`local-dev`, because `.env` sets `GIT_SHA=local-dev` so a CONTAINER can report
+its build, and `git_sha()` consulted the environment before git. One variable
+name, two different questions — "what build is this container?" and "what commit
+produced these numbers?" — and a SHA-keyed scoreboard where every row shares one
+key answers neither. In a checkout only git can answer the second, so git is now
+asked first and `GIT_SHA` is the fallback for running outside one.
+
+**The baseline lookup named a driver the project does not ship.** `postgresql+
+asyncpg`, hand-assembled, when everything else here uses `psycopg` via
+`src/state/db.py`'s `reader_url()`. It cost a 35-minute rerank-ON run: the
+baseline is read AFTER every expensive measurement, so it took the whole run
+down at the final step with all the work done and nothing written.
+
+The second half of that fix matters more than the first. `create_async_engine`
+sat ABOVE the `try` that exists to turn "no baseline" into a report line, so a
+bad URL raised straight past the handler written to absorb it. Construction is
+now inside. And the handler no longer swallows silently — it logs what went
+wrong, because a baseline that vanishes without a word is indistinguishable from
+a fresh clone, and only one of those is a defect.
+
+A third, smaller one: `eval_results` is not the harness's private table. The
+integration suite writes rows keyed `integration` and `itest-*` to prove the
+write path, and those were candidate baselines for every real run — so running
+the test suite changed what the scoreboard said about the code. The baseline
+query now considers only commit-shaped keys.
+
 ### Working rules, earned and adopted
 
 Two rules generalised out of the amendment-S fallout at `b555ea6`. Both are
@@ -467,6 +502,33 @@ Reading document vectors from the graph for both paths leaves direct dot
 product versus index score as the only difference, which is the single thing
 amendment S is about. Splitting is not test-count vanity: it is what makes a
 red test a diagnosis instead of a starting point.
+
+## The eval harness
+
+`make evals` runs every implemented category, writes one self-contained HTML
+report to `out/evals.html`, persists the gated metrics to Postgres keyed by git
+SHA, and prints what moved since the previous SHA. It exits non-zero if any
+measured category fails, so it can gate.
+
+| Category | State | Judged against |
+|---|---|---|
+| extraction | implemented | `fixtures/answer_key_manual.json` — externally authored, builder-immutable |
+| retrieval | implemented | the hand-written key, over the twenty golden questions |
+| grounding | NOT_IMPLEMENTED | needs drafted prose (Phase 4) |
+| compliance | NOT_IMPLEMENTED | needs assembled responses (Phase 4) |
+| quality | NOT_IMPLEMENTED | needs the drafter and `judge-model` (Phase 4, per D16) |
+| adversarial | NOT_IMPLEMENTED | needs the full pipeline to attack (Phase 5) |
+
+Unimplemented categories are **named and greyed in the report, never omitted**,
+each stating the input it waits on. A category simply absent reads as "nothing to
+say about grounding"; a category greyed and named reads as "grounding is not
+measured yet". Only the second is true. They carry no metrics by construction —
+a zero in a placeholder would be persisted, differenced against the next SHA, and
+become an apparent regression on the day it was first really measured.
+
+The harness never edits a threshold, a calibration constant, or the manual answer
+key. A failing eval is a finding about the system, not a prompt to move the line
+it failed against.
 
 ## Testing
 
@@ -502,6 +564,31 @@ those vectors carry no meaning.
 That question is settled only by the zero-tolerance retrieval evals on real
 embeddings, whose numbers every PR quotes. **No CI result may be quoted in their
 place.**
+
+#### Which eval categories CI actually measures
+
+The same split decides what `make evals` is allowed to claim in CI, and the
+answer differs per category rather than per job:
+
+- **Extraction runs for real in CI, and its numbers are the same as local.** It
+  parses the committed PDF and DOCX and compares against the externally-authored
+  manual key. No model, no database, no embeddings — nothing the stand-in
+  touches. Recall, precision, field accuracy, PDF/DOCX parity and the injection
+  flag are therefore CI-provable facts.
+- **Retrieval is deselected in CI**, with `--categories extraction`. Its inputs
+  are stand-in vectors, so a Recall@5 or a rank-1 accuracy measured there is a
+  number about nothing, and gating a build on it would be gating on noise. The
+  report marks the category **DESELECTED** rather than NOT_IMPLEMENTED, because
+  "this run did not execute it" and "this code does not exist" are different
+  facts.
+
+**Open, and deliberately not papered over:** running retrieval under CI would
+need a recorded rerank set keyed by question id. Recordings captured locally
+would not match CI's candidate counts — CI's stand-in vectors produce different
+candidate sets, and `parse_rerank_response` rejects a reply whose index count
+disagrees. Fabricating fixtures to fill that gap would put invented data behind
+a number the report presents as measured, so the category is deselected and the
+gap is written down instead.
 
 ## Changelog
 

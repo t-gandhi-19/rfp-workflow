@@ -241,6 +241,46 @@ jobs:
           export RFP_FAKE_EMBEDDINGS=1
           uv run pytest tests/integration -q -m integration
 
+      # THE EVAL HARNESS, run through its real entry point.
+      #
+      # --categories extraction, and the reason is not convenience. This job
+      # ingests with the stand-in embedder, so its vectors carry no semantics:
+      # a Recall@5 or a rank-1 accuracy measured on them is a number about
+      # nothing, and gating a build on it would be gating on noise. The
+      # retrieval numbers of record come from a local run against
+      # nomic-embed-text in the shipped rerank-ON configuration.
+      #
+      # Extraction, by contrast, is FULLY REAL here: it parses the committed PDF
+      # and DOCX and compares against the externally-authored manual key, with no
+      # model and no database involved. Its recall, precision, field accuracy,
+      # parity and injection numbers in CI are the same numbers as locally.
+      #
+      # --no-persist: this job's Postgres is torn down with the runner, so a
+      # write would produce a scoreboard row nothing can ever compare against.
+      # The eval-writer path itself is covered by the integration suite.
+      #
+      # OPEN: running retrieval here needs a recorded rerank set keyed by
+      # question id, and recordings captured locally would not match this job's
+      # candidate counts. Rather than fabricate fixtures, the category is
+      # deselected and the report says DESELECTED rather than NOT_IMPLEMENTED.
+      - name: Eval harness (extraction is real here; retrieval is not)
+        run: |
+          set -a && source .env && set +a
+          export RFP_FAKE_EMBEDDINGS=1
+          uv run python -m scripts.evals \
+            --categories extraction --no-persist --out "$RUNNER_TEMP/evals.html"
+          test -s "$RUNNER_TEMP/evals.html" || { echo "no report was written"; exit 1; }
+          grep -q "NOT IMPLEMENTED" "$RUNNER_TEMP/evals.html" \
+            || { echo "placeholders are missing from the report"; exit 1; }
+
+      - name: Upload the eval report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: eval-report
+          path: ${{ runner.temp }}/evals.html
+          if-no-files-found: warn
+
       - name: Confirm the write actually landed in Postgres
         run: |
           set -a && source .env && set +a

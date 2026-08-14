@@ -242,17 +242,33 @@ reembed: preflight-pre-ingest ## Recompute every embedding, then recalibrate
 	@set -a && source .env && set +a && $(HOST_NEO4J) $(RUN) python -m scripts.ingest --reembed
 	@$(MAKE) --no-print-directory calibrate
 
+# The harness dials Neo4j (retrieval), the gateway (embeddings), Keycloak and
+# write-api (persisting eval_results as evals-sa), and Postgres directly for the
+# previous SHA's rows. HOST_PG as well as HOST_NEO4J, because that read is the
+# only place the harness talks to Postgres without going through write-api.
 .PHONY: evals
-evals: ## Run the eval harness with the config-default rerank setting (fast path)
-	$(call phase_gate,evals,3,Needs retrieval scoring and the golden answer key.)
+evals: check-env ## Run the eval harness with the config-default rerank setting (fast path)
+	@set -a && source .env && set +a && \
+		$(HOST_NEO4J) $(HOST_PG) $(PREFLIGHT_ENV) \
+		KEYCLOAK_BASE=$${KEYCLOAK_BASE:-http://localhost:$${KEYCLOAK_PORT_HOST:-8080}} \
+		WRITE_API_BASE=$${WRITE_API_BASE:-http://localhost:$${WRITE_API_PORT:-8001}} \
+		$(RUN) python -m scripts.evals
 
 .PHONY: evals-full
-evals-full: ## Run the eval harness with rerank FORCED ON — the official numbers
-	$(call phase_gate,evals-full,3,Needs retrieval scoring and the golden answer key.)
+evals-full: check-env ## Run the eval harness with rerank FORCED ON — the official numbers
+	@set -a && source .env && set +a && \
+		$(HOST_NEO4J) $(HOST_PG) $(PREFLIGHT_ENV) \
+		KEYCLOAK_BASE=$${KEYCLOAK_BASE:-http://localhost:$${KEYCLOAK_PORT_HOST:-8080}} \
+		WRITE_API_BASE=$${WRITE_API_BASE:-http://localhost:$${WRITE_API_PORT:-8001}} \
+		$(RUN) python -m scripts.evals --rerank
 
 .PHONY: evals-ablation
-evals-ablation: ## Run retrieval twice, rerank on and off, and report the deltas
-	$(call phase_gate,evals-ablation,3,Needs the retrieval eval category.)
+evals-ablation: check-env ## Run retrieval twice, rerank on and off, and report the deltas
+	@set -a && source .env && set +a && \
+		$(HOST_NEO4J) $(HOST_PG) $(PREFLIGHT_ENV) \
+		KEYCLOAK_BASE=$${KEYCLOAK_BASE:-http://localhost:$${KEYCLOAK_PORT_HOST:-8080}} \
+		WRITE_API_BASE=$${WRITE_API_BASE:-http://localhost:$${WRITE_API_PORT:-8001}} \
+		$(RUN) python -m scripts.evals --rerank --ablation
 
 .PHONY: run
 run: ## (Phase 4) Run one RFP end to end — make run FILE=path/to/rfp.pdf

@@ -78,6 +78,15 @@ REQUIRED_WIRING: dict[str, set[str]] = {
     # Postgres over the published port, via Alembic.
     "migrate": {HOST_PG},
     "migrate-status": {HOST_PG},
+    # The eval harness (step 8) is the widest-reaching target in the file. It
+    # dials Neo4j for retrieval, the gateway for embeddings, Keycloak and
+    # write-api to persist eval_results as evals-sa, and Postgres DIRECTLY for
+    # the previous SHA's rows — the one place the harness reads without going
+    # through write-api, and therefore the reason HOST_PG appears alongside
+    # HOST_NEO4J here and nowhere else outside the Alembic targets.
+    "evals": {HOST_NEO4J, HOST_PG, PREFLIGHT_ENV},
+    "evals-full": {HOST_NEO4J, HOST_PG, PREFLIGHT_ENV},
+    "evals-ablation": {HOST_NEO4J, HOST_PG, PREFLIGHT_ENV},
     # Neither: they read and write only the repo.
     "fixtures": set(),
     "fixtures-check": set(),
@@ -101,6 +110,11 @@ DIALS_NEO4J_FROM_HOST = {
     "calibrate",
     "calibrate-dry",
     "calibrate-commission",
+    # Step 8. The retrieval category opens a graph session for all twenty golden
+    # questions, so these belong to the same class as the targets above.
+    "evals",
+    "evals-full",
+    "evals-ablation",
 }
 
 
