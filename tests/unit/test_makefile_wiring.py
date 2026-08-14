@@ -50,6 +50,10 @@ MAKEFILE = REPO_ROOT / "Makefile"
 HOST_NEO4J = "$(HOST_NEO4J)"
 PREFLIGHT_ENV = "$(PREFLIGHT_ENV)"
 HOST_PG = "$(HOST_PG)"
+#: The HTTP bases `tests/live.py` probes. Their defaults are the CONVENTIONAL
+#: ports, so on a machine where another stack owns 8080 the probe succeeds
+#: against somebody else's Keycloak — a pass that means nothing.
+HOST_SERVICES = "$(HOST_SERVICES)"
 
 #: What each script-invoking target must apply, and why.
 #:
@@ -92,6 +96,14 @@ REQUIRED_WIRING: dict[str, set[str]] = {
     "fixtures-check": set(),
     "validate-manual-key": set(),
     "manual-key-schema": set(),
+    # The test targets. `test` runs unit+security, which reach nothing outside
+    # the repo. The other two run the INTEGRATION suite against a live stack
+    # from the host, so they need every host address there is: Neo4j over Bolt,
+    # Postgres on its published port (the eval-store tests), and the three HTTP
+    # bases in HOST_SERVICES.
+    "test": set(),
+    "test-integration": {HOST_NEO4J, HOST_PG, HOST_SERVICES},
+    "test-report": {HOST_NEO4J, HOST_PG, HOST_SERVICES},
 }
 
 #: Targets that dial Neo4j from the host. Named separately from the table above
@@ -115,6 +127,11 @@ DIALS_NEO4J_FROM_HOST = {
     "evals",
     "evals-full",
     "evals-ablation",
+    # The integration suite opens graph sessions in most of its files. Both of
+    # these shipped without HOST_NEO4J, which is why neither had an invocation
+    # that could run those tests rather than skip or error them.
+    "test-integration",
+    "test-report",
 }
 
 
@@ -152,6 +169,28 @@ def script_invoking_targets() -> dict[str, str]:
     """Targets whose recipe runs a `python -m scripts.*` module."""
     return {
         name: body for name, body in recipes().items() if re.search(r"python -m scripts\.", body)
+    }
+
+
+def integration_suite_targets() -> dict[str, str]:
+    """Targets whose recipe runs the INTEGRATION suite from the host.
+
+    A SECOND blind spot of the same shape as the first. The completeness net
+    above derives its set from the Makefile precisely so a new target cannot go
+    unnoticed — but it only ever looked for `python -m scripts.*`, and the two
+    targets that dial the whole stack invoke *pytest*. Both were therefore
+    outside the net that exists to catch exactly them, and both shipped with no
+    host wiring at all.
+
+    Derived rather than hand-listed, for the reason the original net is:
+    `test-integration` names the path directly, `test-report` reaches it through
+    a `for suite in unit security integration` loop, and a third spelling should
+    fail here rather than be silently uncovered.
+    """
+    return {
+        name: body
+        for name, body in recipes().items()
+        if "pytest" in body and re.search(r"\bintegration\b", body)
     }
 
 
@@ -254,6 +293,38 @@ class TestCoverageIsComplete:
             f"these targets run a script but have no wiring decision recorded: {undeclared}. "
             f"Add each to REQUIRED_WIRING with the fragments its command needs — an empty set "
             f"if it dials nothing — so the choice is explicit rather than assumed."
+        )
+
+    def test_the_integration_suite_targets_are_found(self) -> None:
+        """The derivation has to be right, or the two tests below are vacuous."""
+        found = set(integration_suite_targets())
+        assert {"test-integration", "test-report"} <= found
+        # `test` runs pytest but only over unit and security, so it reaches
+        # nothing and must stay out — otherwise the assertions below would be
+        # demanding host wiring from a target that dials nothing.
+        assert "test" not in found
+
+    @pytest.mark.parametrize("target", sorted(integration_suite_targets()))
+    def test_every_integration_target_supplies_the_host_service_bases(self, target: str) -> None:
+        """The half of the wiring that no other target needs.
+
+        `tests/live.py` defaults KEYCLOAK_BASE/WRITE_API_BASE/MCP_BASE to the
+        conventional ports. On a host running a second stack those ports belong
+        to somebody else, so without HOST_SERVICES the probes either fail (and
+        skip the suite) or — worse — succeed against the wrong service.
+        """
+        assert HOST_SERVICES in recipes()[target], (
+            f"'{target}' runs the integration suite from the host but does not apply "
+            f"{HOST_SERVICES}, so tests/live.py probes the conventional ports rather "
+            f"than the ones this .env publishes."
+        )
+
+    def test_every_integration_target_has_a_recorded_wiring_decision(self) -> None:
+        """The completeness half, for the pytest-invoking class."""
+        undeclared = sorted(set(integration_suite_targets()) - set(REQUIRED_WIRING))
+        assert not undeclared, (
+            f"these targets run the integration suite but have no wiring decision "
+            f"recorded: {undeclared}. Add each to REQUIRED_WIRING."
         )
 
     def test_the_table_does_not_name_targets_that_no_longer_exist(self) -> None:

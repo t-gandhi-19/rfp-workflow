@@ -81,6 +81,16 @@ HOST_PG = POSTGRES_HOST=localhost POSTGRES_PORT=$${POSTGRES_PORT_HOST:-5432}
 HOST_NEO4J = NEO4J_URI=bolt://localhost:$${NEO4J_BOLT_PORT_HOST:-7687} \
              LITELLM_BASE_URL_HOST=$${LITELLM_BASE_URL_HOST:-http://localhost:$${LITELLM_PORT_HOST:-4000}}
 
+# The HTTP services the integration suite dials, in their host form. Same reason
+# as HOST_NEO4J and HOST_PG: `.env` holds the CONTAINER view of the world, and
+# `tests/live.py` defaults these to the CONVENTIONAL ports (8080/8001/8002) —
+# which on a machine where another stack owns those ports is somebody else's
+# Keycloak. A probe answering from the wrong service is worse than one that
+# fails, so the port overrides have to reach the suite.
+HOST_SERVICES = KEYCLOAK_BASE=$${KEYCLOAK_BASE:-http://localhost:$${KEYCLOAK_PORT_HOST:-8080}} \
+                WRITE_API_BASE=$${WRITE_API_BASE:-http://localhost:$${WRITE_API_PORT:-8001}} \
+                MCP_BASE=$${MCP_BASE:-http://localhost:$${MCP_PORT_HOST:-8002}}
+
 .PHONY: migrate
 migrate: check-env ## Apply Alembic migrations (idempotent)
 	set -a && source .env && set +a && $(HOST_PG) $(RUN) alembic upgrade head
@@ -102,7 +112,19 @@ test: ## Run unit and security tests
 
 .PHONY: test-integration
 test-integration: check-env ## Run integration tests (requires 'make up')
-	$(RUN) pytest tests/integration -q -m integration
+	@# Amendment Q's fault class, in the target CLAUDE.md points a reviewer at.
+	@# This recipe supplied NO host wiring at all, and so had no invocation that
+	@# ran the suite: bare, it never sourced .env, `require_env` skipped all 97
+	@# tests and the target reported green having proved nothing; with .env
+	@# sourced by hand — the obvious way to make it run — NEO4J_URI is the
+	@# compose service name and 38 graph tests ERROR instead.
+	@#
+	@# CI was never blind here (the compose-smoke job runs this suite), but it
+	@# exports the same six variables inline, which is exactly the "supplying by
+	@# hand what the recipe must supply" that hid the original fault.
+	@set -a && source .env && set +a && \
+		$(HOST_NEO4J) $(HOST_PG) $(HOST_SERVICES) \
+		$(RUN) pytest tests/integration -q -m integration
 
 .PHONY: test-all
 test-all: test test-integration ## Run every test
@@ -132,12 +154,15 @@ test-report: ## Per-suite verbatim pytest summaries + the SHA they were produced
 	else \
 		echo "pushed:    UNPUSHED — local $$(git rev-parse --short $$LOCAL) ahead of origin $$(git rev-parse --short $$REMOTE)"; \
 	fi
+	@# The integration line of this report is the one CLAUDE.md requires "whenever
+	@# the stack is up", so it has to be able to reach the stack. It carried the
+	@# two HTTP bases and neither NEO4J_URI nor the host Postgres, which made its
+	@# integration summary a line about 38 errors rather than about the suite.
 	@set -a; [ -f .env ] && . ./.env; set +a; \
-	export KEYCLOAK_BASE=$${KEYCLOAK_BASE:-http://localhost:$${KEYCLOAK_PORT_HOST:-8080}}; \
-	export WRITE_API_BASE=$${WRITE_API_BASE:-http://localhost:$${WRITE_API_PORT:-8001}}; \
 	for suite in unit security integration; do \
 		printf '\n### tests/%s\n' "$$suite"; \
-		$(RUN) pytest tests/$$suite -q 2>&1 | tail -1; \
+		$(HOST_NEO4J) $(HOST_PG) $(HOST_SERVICES) \
+			$(RUN) pytest tests/$$suite -q 2>&1 | tail -1; \
 	done
 
 .PHONY: tag-phase
