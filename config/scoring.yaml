@@ -49,6 +49,51 @@ rerank:
   # CPU-only host, and "it feels better" is not a reason to pay that. Whichever
   # way it lands, the unused path stays tested in CI via recorded responses.
   #
+  # RE-CONFIRMED 2026-08-14 at 9c239da, through `make evals --rerank --ablation`
+  # — the step 8 harness rather than the step 5 runner, so the decision is now
+  # reproduced by the command the Makefile documents. Same graph, same artifact,
+  # same 20 questions, real embeddings (nomic-embed-text:v1.5, corpus
+  # a3d1eea3a24d6cb7).
+  #
+  #                        rerank OFF     rerank ON      delta (on - off)
+  #   Recall@5               1.0000         1.0000          0.0000
+  #   rank1_accuracy         0.9333         1.0000         +0.0667
+  #   MRR                    0.9667         1.0000         +0.0333
+  #   preference-decisive    0.0667         0.0000         -0.0667
+  #   baits refused          2 (3.4, 4.2)   1 (3.4)        -1
+  #   verdict                FAIL           PASS
+  #
+  #   rule applied verbatim, unchanged:
+  #     |dRecall@5| < 0.02 AND |dMRR| < 0.03  ->  enabled: false
+  #     0.0000 < 0.02 TRUE;  0.0333 < 0.03 FALSE.  The AND fails.
+  #   DECISION UNCHANGED: rerank.enabled stays TRUE, cost accepted.
+  #
+  #   STILL A CLOSE CALL, and recorded as one rather than rounded into comfort:
+  #   0.0333 against a 0.03 threshold. The decision FLIPS AT A THRESHOLD OF
+  #   0.035. A reader proposing to relax that number is proposing to disable
+  #   rerank, and should read the coupling below before doing so.
+  #
+  #   THE OFF ARM NOW FAILS ITS CATEGORY OUTRIGHT, which it did not in the
+  #   original measurement — because `rank1_accuracy` did not exist then. That is
+  #   the gate doing its job on a non-shipped arm, not a regression: the OFF arm
+  #   scores 14/15 precisely because of the golden-1.1 inversion, reproduced
+  #   below to the fourth decimal.
+  #
+  #     rerank OFF, question 1.1, floor 0.5975:
+  #       1. ANS-0032   rel 0.8247  pref 1.1951  final 0.9856   <- wins
+  #       2. ANS-0037   rel 1.0000  pref 0.9045  final 0.9045   <- the key's
+  #                                                                only direct
+  #                                                                team-model
+  #                                                                answer
+  #     rerank ON:  ANS-0037 at rank 1. Expected answer rank 1 vs 2.
+  #
+  # VALIDITY CONFIRMED BEFORE ACCEPTING THE RESULT (as at bdddbba). The run is
+  # keyed 9c239da, and `git diff --name-only 9c239da..HEAD` over src/retrieval,
+  # src/contracts/thresholds.py, config/scoring.yaml and fixtures/ is EMPTY — so
+  # nothing touching scoring, retrieval, calibration or the corpus landed after
+  # the measurement. The harness captures the SHA before the first category runs
+  # (0c2af81), so a commit landing mid-run cannot relabel these numbers.
+  #
   # STATUS: APPLIED 2026-08-13. Measured once, deliberately, on real embeddings
   # against the final scoring, after the units fix (aa91ae0). Both arms ran on
   # the same graph, the same artifact and the same 20 golden questions.
