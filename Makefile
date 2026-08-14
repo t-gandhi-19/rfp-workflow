@@ -173,7 +173,11 @@ tag-phase: ## Tag a phase — make tag-phase TAG=v0.3 (refuses unless main is cl
 lint: ## ruff check + format check + mypy
 	$(UVRUN) ruff check .
 	$(UVRUN) ruff format --check .
-	$(UVRUN) mypy src tests
+	@# `scripts` is in the target list since Phase 4. It was not, and two real
+	@# defects lived in that blind spot: `scripts/run.py` imported a name the
+	@# module does not export, and called `.id` on an SMERecord whose field is
+	@# `sme_id`. Both are the composition root, which nothing else type-checks.
+	$(UVRUN) mypy src tests scripts
 
 .PHONY: fmt
 fmt: ## Autoformat and autofix

@@ -27,6 +27,8 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Callable
+from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass, field
 from datetime import date
 
@@ -55,6 +57,7 @@ from src.controller.budget import BudgetLedger, CallKind, CallUsage
 from src.controller.protocols import AgentValidationError
 from src.extraction.questions import parse_questions
 from src.gateway.client import GatewayClient
+from src.graph import driver as graph_driver
 from src.guardrails.injection import wrap
 from src.observability.tracing import llm_span
 from src.prompts import load_prompt
@@ -97,7 +100,23 @@ def _require(crew_output: object, model: type, *, step: str) -> object:
 class CrewAgentLayer:
     """The controller's five collaborators, backed by crewAI and MCP."""
 
-    session: AsyncSession
+    #: A FACTORY, not a session. The controller fans questions out concurrently,
+    #: and a Neo4j `AsyncSession` is NOT safe for concurrent use — sharing one
+    #: across the fan-out produces
+    #:
+    #:     RuntimeError: read() called while another coroutine is already
+    #:     waiting for incoming data
+    #:
+    #: on some questions and `ServiceUnavailable: Failed to read from closed
+    #: connection` on others, as several coroutines read the same connection.
+    #: The DRIVER is safe to share and pools underneath, so the cost of a
+    #: session per question is a checkout, not a connection.
+    #:
+    #: Found by a real run: 12 of 15 matched questions escalated as
+    #: STAGE_ERROR inside `retrieve`, and nothing reached a model at all. The
+    #: unit suite could not see it (the agent layer is stubbed) and neither
+    #: could the integration suite (it retrieves sequentially).
+    session_factory: Callable[[], AbstractAsyncContextManager[AsyncSession]] = graph_driver.session  # type: ignore[assignment]
     gateway: GatewayClient = field(default_factory=GatewayClient.from_env)
     #: `drafter-sa`, used by the drafter's and critic's tools. There is no
     #: retriever client here on purpose: the retrieval PIPELINE is deterministic
@@ -192,7 +211,12 @@ class CrewAgentLayer:
         """
         budget.authorize(CallKind.RERANK, question_id=question.id)
 
-        async with httpx.AsyncClient(timeout=self.gateway.timeout) as client:
+        # A SESSION PER QUESTION. See `session_factory` — the fan-out is
+        # concurrent and a Neo4j session is not.
+        async with (
+            httpx.AsyncClient(timeout=self.gateway.timeout) as client,
+            self.session_factory() as session,
+        ):
             embedding = (
                 await self.gateway.embed(
                     [question.normalized_text],
@@ -204,7 +228,7 @@ class CrewAgentLayer:
 
             artifact = self.calibration or load_for_current_corpus()
             result, trace = await retrieve(
-                self.session,
+                session,
                 question_id=question.id,
                 question_text=question.normalized_text,
                 embedding=embedding,

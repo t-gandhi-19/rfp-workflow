@@ -588,7 +588,22 @@ class RunController:
     async def _halt(
         self, state: RunState, halt: RunHaltedError, *, document: RFPDocument
     ) -> RunResult:
-        """Record the halt with everything already produced still checkpointed."""
+        """Record the halt with everything already produced still checkpointed.
+
+        THE HALT IS REPORTED EVEN IF IT CANNOT BE RECORDED. `_halt` is the last
+        thing a dying run does, and it checkpoints — so a checkpoint failure
+        here used to raise straight out of `run()`, destroying the RunResult
+        that describes the halt as well as the halt record itself. The caller
+        then saw a traceback instead of "halted(infra), nothing answered".
+
+        Found the same way as the token expiry that caused it: a long run whose
+        credential went stale mid-fan-out failed to write the run row, and the
+        failure to record the halt was louder than the halt.
+
+        The result is still an honest one — `answered=0`, so `scripts/run.py`
+        exits non-zero — and the error is logged at ERROR with the reason the
+        row is missing.
+        """
         logger.error("run %s halted (%s): %s", state.run_id, halt.reason, halt.detail)
         halted = state.model_copy(
             update={
@@ -599,7 +614,17 @@ class RunController:
                 "cost_usd": self.ledger.cost_usd,
             }
         )
-        await self._checkpoint(halted)
+        try:
+            await self._checkpoint(halted)
+        except CheckpointError as exc:
+            logger.error(
+                "run %s halted (%s) and the halt could NOT be checkpointed: %s. "
+                "The run row will not say HALTED; everything written before the "
+                "halt is still there.",
+                state.run_id,
+                halt.reason,
+                exc,
+            )
         return RunResult(
             run_id=state.run_id,
             answers=[],

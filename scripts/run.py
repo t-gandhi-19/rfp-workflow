@@ -72,7 +72,7 @@ async def _sme_routing(session: object) -> dict[str, tuple[str, str]]:
             logger.warning("SME routing for '%s' unavailable: %s", capability, exc)
             continue
         if smes:
-            routing[capability] = (smes[0].id, smes[0].name)
+            routing[capability] = (smes[0].sme_id, smes[0].name)
     return routing
 
 
@@ -89,7 +89,7 @@ async def execute(
     logger.info("%s", status.summary)
 
     async with graph_driver.session() as session:
-        agents = CrewAgentLayer(session=session)  # type: ignore[arg-type]
+        agents = CrewAgentLayer()
         routing = await _sme_routing(session)
         controller = RunController(
             agents=agents,

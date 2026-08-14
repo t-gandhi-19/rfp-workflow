@@ -66,8 +66,15 @@ class Checkpointer:
     timeout: float = 30.0
     _token: str | None = field(default=None, repr=False)
 
-    async def _authenticate(self, client: httpx.AsyncClient) -> str:
-        if self._token is not None:
+    async def _authenticate(self, client: httpx.AsyncClient, *, force: bool = False) -> str:
+        """The controller's token, minted once and re-minted when it expires.
+
+        `force` discards the cached one. A Keycloak access token lives minutes
+        and a run lives as long as the fan-out takes, so caching it for the
+        whole run — which this did — guarantees a 401 on any run slower than the
+        token lifetime. See `_put`.
+        """
+        if self._token is not None and not force:
             return self._token
         secret = os.environ.get(CONTROLLER_SECRET_ENV)
         if not secret:
@@ -93,30 +100,39 @@ class Checkpointer:
         return token
 
     async def _put(self, client: httpx.AsyncClient, path: str, payload: dict[str, object]) -> None:
-        """PUT once, and once more if the CONNECTION died rather than the request.
+        """PUT once, and once more for the two failures a LONG RUN produces.
 
-        A run holds one client across a fan-out that can take many minutes, and
-        an idle keep-alive connection gets closed by the server or an
-        intermediary in that time. httpx surfaces that as
-        `Server disconnected without sending a response` on the next use — a
-        transport failure, not a refusal, and one that succeeds immediately on a
-        fresh connection.
+        Both retries exist because a run holds one client and one token across a
+        fan-out that takes many minutes, and both were found by real runs rather
+        than by the suite.
 
-        This is not a general retry policy. Only `TransportError` is retried,
-        and only once: a 4xx is a refusal that will be refused again, and every
-        write here is an idempotent upsert on a natural key, so re-sending one
-        that may already have landed cannot double-write.
+        **The connection dies.** An idle keep-alive connection gets closed by
+        the server or an intermediary; httpx reports
+        `Server disconnected without sending a response` on the next use. A
+        transport failure, not a refusal, and it succeeds on a fresh connection.
 
-        Found by a real run, where a dropped connection during an escalation
-        took down a run that had already survived the error being escalated.
+        **The token expires.** A Keycloak access token lives minutes. Caching
+        one for the whole run guaranteed a 401 on any run slower than its
+        lifetime — which is every real run: a 14-minute local-tier run died on
+        `Invalid token: Signature has expired`, and because the halt path
+        checkpoints too, the halt died with it. A 401 is therefore re-minted and
+        retried ONCE, which is a different thing from retrying a refusal: the
+        credential was valid and became stale, and the second attempt carries a
+        new one rather than the same one again.
+
+        Nothing else is retried. A 403 is a role that was never granted and a
+        422 is a payload that will not become valid; re-sending either spends
+        the budget to be told the same thing twice. Re-sending is safe because
+        every write here is an idempotent upsert on a natural key.
         """
         token = await self._authenticate(client)
         url = f"{self.base_url}{path}"
-        headers = {"Authorization": f"Bearer {token}"}
 
         for attempt in (1, 2):
             try:
-                response = await client.put(url, json=payload, headers=headers)
+                response = await client.put(
+                    url, json=payload, headers={"Authorization": f"Bearer {token}"}
+                )
             except httpx.TransportError as exc:
                 if attempt == 1:
                     logger.info("write-api connection dropped on %s; retrying once", path)
@@ -124,6 +140,11 @@ class Checkpointer:
                 raise CheckpointError(f"write-api unreachable for {path}: {exc}") from exc
             except httpx.HTTPError as exc:
                 raise CheckpointError(f"write-api unreachable for {path}: {exc}") from exc
+
+            if response.status_code == 401 and attempt == 1:
+                logger.info("checkpoint token expired on %s; re-authenticating once", path)
+                token = await self._authenticate(client, force=True)
+                continue
             if response.status_code != 200:
                 raise CheckpointError(
                     f"write-api refused {path}: {response.status_code} {response.text[:300]}"

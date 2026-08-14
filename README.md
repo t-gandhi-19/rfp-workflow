@@ -306,6 +306,26 @@ find things, and should treat that as the point of running it.
 manufacture a passing number. There is no fixture standing in for a drafted
 answer anywhere in the eval path.
 
+**The local tier was tried as a substitute, and cannot be one on this hardware.**
+`docker/litellm/config.local-tier.yaml` points `drafter-model` and
+`critic-model` at Ollama and is committed, because the attempt was worth keeping
+and is the only way to exercise this pipeline without a credential. It did not
+produce a demo, for a reason that is measured rather than estimated: the shared
+CPU-only Ollama processes prompts at **10.1 tokens/second**, and a drafter
+prompt is ~2,400 tokens — about four minutes to INGEST one prompt before
+generating a single token. Draft plus critique is 8–10 minutes per question,
+serialised on one slot, so twenty questions is roughly three hours of
+poor-quality 3B drafting. `llama3.1:8b` was tried first and was slower still:
+no question completed in nine minutes.
+
+Two consequences, both stated rather than worked around. The judge alias is
+deliberately left on Groq in that file and therefore unusable, because D16's
+first control is a DIFFERENT MODEL FAMILY from the drafter and this host has one
+family plus an embedder — a local judge would be a model marking its own
+homework, so quality and hallucination stay unmeasured. And every number such a
+run could produce would be a number about the local tier, not the numbers of
+record, which are defined as the shipped rerank-ON Groq configuration.
+
 ### D19 addendum / amendment S — self-consistency is not agreement
 
 **The canary had a blind spot, and it was structural.** D19 replaced a
@@ -593,6 +613,43 @@ gitignored-reads scanners: green everywhere, broken somewhere nothing executes.
    refusal that will be refused again. Re-sending is safe because every write is
    an idempotent upsert on a natural key, which is the same property `make
    resume` rests on.
+
+**Three more, from running the pipeline on the local tier when the Groq
+credential proved absent.** The attempt did not produce a demo — see the
+hardware wall below — but it exercised the concurrent fan-out against a real
+graph for the first time, and that is where these lived:
+
+4. **A Neo4j `AsyncSession` was shared across the concurrent fan-out.** The
+   composition root opened one session and handed it to the agent layer; the
+   controller then ran five questions against it at once. A Neo4j session is not
+   safe for concurrent use, and the result was
+   `RuntimeError: read() called while another coroutine is already waiting for
+   incoming data` on some questions and `ServiceUnavailable: Failed to read from
+   closed connection` on others — **12 of 15 matched questions escalated as
+   STAGE_ERROR inside `retrieve`, and nothing reached a model at all.** The
+   agent layer now takes a session FACTORY and opens one per question; the
+   driver is shared and pools underneath, so the cost is a checkout rather than
+   a connection. Neither suite could see it: the unit tests stub the agent layer
+   entirely, and the integration tests retrieve sequentially.
+5. **The checkpoint token was minted once and never refreshed.** A Keycloak
+   access token lives minutes; a run lives as long as its fan-out. Any run
+   slower than the token lifetime died on
+   `401 Invalid token: Signature has expired` — which is every real run. A 401
+   is now re-minted and retried once, which is a different thing from retrying a
+   refusal: the credential was valid and went stale, and the second attempt
+   carries a new one rather than the same one again.
+6. **The halt path destroyed the report of the halt.** `_halt` checkpoints, so
+   when the expired token made that write fail, the exception raised straight
+   out of `run()` — taking the `RunResult` that described the halt with it. The
+   caller saw a traceback instead of "halted(infra), nothing answered". The halt
+   is now reported even when it cannot be recorded, with the reason logged at
+   ERROR.
+
+**`scripts/` is in the mypy targets since Phase 4**, in the Makefile and in CI.
+It was not, and two of the six defects above lived in exactly that blind spot —
+the `ImportError`, and a `.id` on an `SMERecord` whose field is `sme_id`. The
+composition root is the one module nothing else type-checks and the one module
+every run goes through.
 
 ### Working rules, earned and adopted
 
