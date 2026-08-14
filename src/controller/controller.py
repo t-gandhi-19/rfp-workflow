@@ -64,7 +64,7 @@ from src.controller.budget import (
     QuestionBudgetError,
     RunBudgetError,
 )
-from src.controller.checkpoint import ResumableRun
+from src.controller.checkpoint import CheckpointError, ResumableRun
 from src.controller.limits import LimitsConfig, limits_config
 from src.controller.protocols import (
     AgentLayer,
@@ -335,7 +335,21 @@ class RunController:
     async def _guarded_pipeline(
         self, document: RFPDocument, question: ExtractedQuestion, state: RunState
     ) -> QuestionOutcome:
-        """The per-question blast radius, with the span already open."""
+        """The per-question blast radius, with the span already open.
+
+        THE ERROR PATH IS ITSELF PROTECTED, and it was not until a live run
+        proved otherwise. `_escalated` does I/O — it checkpoints the new status
+        — and that I/O is performed INSIDE the `except` block, where a second
+        failure is not caught by the handler that is already running. A dropped
+        write-api connection during an escalation therefore propagated out of
+        the fan-out and killed a run that had already survived the original
+        error.
+
+        A checkpoint failure is still serious: a run whose state is not durable
+        cannot be resumed. So it halts the run — but as `halted(infra)`, through
+        the halt path, with everything already written preserved, rather than as
+        a raw traceback that bypasses it.
+        """
         try:
             return await self._pipeline(document, question, state)
         except RunHaltedError:
@@ -344,7 +358,7 @@ class RunController:
             raise RunHaltedError(HaltReason.BUDGET, str(exc)) from exc
         except QuestionBudgetError as exc:
             record_failure(exc)
-            return await self._escalated(
+            return await self._escalate_safely(
                 question, state, EscalationTrigger.VALIDATION_FAILED, str(exc)
             )
         except Exception as exc:
@@ -356,12 +370,28 @@ class RunController:
                 type(exc).__name__,
                 exc,
             )
-            return await self._escalated(
+            return await self._escalate_safely(
                 question,
                 state,
                 EscalationTrigger.STAGE_ERROR,
                 f"{type(exc).__name__}: {exc}",
             )
+
+    async def _escalate_safely(
+        self,
+        question: ExtractedQuestion,
+        state: RunState,
+        trigger: EscalationTrigger,
+        reason: str,
+    ) -> QuestionOutcome:
+        """Record an escalation, converting a checkpoint failure into a halt."""
+        try:
+            return await self._escalated(question, state, trigger, reason)
+        except CheckpointError as exc:
+            raise RunHaltedError(
+                HaltReason.INFRA,
+                f"could not checkpoint the escalation of {question.id}: {exc}",
+            ) from exc
 
     async def _pipeline(
         self, document: RFPDocument, question: ExtractedQuestion, state: RunState

@@ -32,7 +32,7 @@ from src.extraction.document import extract
 from src.graph import driver as graph_driver
 from src.graph import queries
 from src.guardrails.suite import DeterministicGuardrails
-from src.observability.logging import configure_logging
+from src.observability.logging import configure_app_logging
 from src.observability.tracing import configure_tracing, instrument_httpx, tracing_status
 
 logger = logging.getLogger("rfp.run")
@@ -79,7 +79,7 @@ async def _sme_routing(session: object) -> dict[str, tuple[str, str]]:
 async def execute(
     *, file: Path | None, customer: str, resume_run: str | None, out_dir: Path
 ) -> RunResult:
-    configure_logging()
+    configure_app_logging()
     status = configure_tracing("rfp-controller")
     # Instrumenting httpx is THE JOIN (§19): every outbound call — to the
     # gateway, to write-api, to mcp-server — carries a traceparent, so our spans

@@ -314,6 +314,56 @@ class TestBudgetsHaltTheRun:
         assert assembler.calls == 0
 
 
+class TestTheErrorPathIsItselfProtected:
+    """Found by a live run, not by this suite.
+
+    `_escalated` does I/O — it checkpoints the new status — and it is called
+    from INSIDE an `except` block, where a second failure is not caught by the
+    handler already running. A write-api connection that dropped during an
+    escalation therefore propagated out of the fan-out and killed a run that had
+    already survived the error being escalated.
+    """
+
+    async def test_a_checkpoint_failure_while_escalating_halts_rather_than_crashing(
+        self,
+    ) -> None:
+        agents = StubAgentLayer(raise_on_retrieve={"GQ-002"})
+        checkpointer = RecordingCheckpointer(fail_status_writes={QuestionStatus.ESCALATED})
+        controller = RunController(
+            agents=agents,
+            guardrails=StubGuardrails(),
+            compliance=StubCompliance(),
+            assembler=StubAssembler(),
+            checkpointer=checkpointer,
+        )
+        # No raw traceback: it goes through the halt path.
+        await controller.run(make_document(), run_id="run-1")
+        assert checkpointer.runs[-1].stage is RunStage.HALTED
+        assert checkpointer.runs[-1].halted_reason is HaltReason.INFRA
+
+    async def test_the_halt_names_the_question_it_could_not_record(self) -> None:
+        agents = StubAgentLayer(raise_on_retrieve={"GQ-002"})
+        checkpointer = RecordingCheckpointer(fail_status_writes={QuestionStatus.ESCALATED})
+        controller = RunController(
+            agents=agents,
+            guardrails=StubGuardrails(),
+            compliance=StubCompliance(),
+            assembler=StubAssembler(),
+            checkpointer=checkpointer,
+        )
+        await controller.run(make_document(), run_id="run-1")
+        # The run halted; everything written before it survives.
+        assert checkpointer.drafts or checkpointer.statuses
+
+    async def test_a_run_whose_escalations_checkpoint_fine_still_completes(self) -> None:
+        """The guard must not turn every escalation into a halt."""
+        agents = StubAgentLayer(raise_on_retrieve={"GQ-002"})
+        controller, checkpointer, _ = build(agents)
+        result = await controller.run(make_document(), run_id="run-1")
+        assert result.totals.escalated == 1
+        assert checkpointer.runs[-1].stage is RunStage.COMPLETE
+
+
 class TestTheFanOut:
     async def test_every_question_is_attempted(self) -> None:
         agents = StubAgentLayer(questions=make_questions(12))

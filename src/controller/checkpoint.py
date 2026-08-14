@@ -93,19 +93,42 @@ class Checkpointer:
         return token
 
     async def _put(self, client: httpx.AsyncClient, path: str, payload: dict[str, object]) -> None:
+        """PUT once, and once more if the CONNECTION died rather than the request.
+
+        A run holds one client across a fan-out that can take many minutes, and
+        an idle keep-alive connection gets closed by the server or an
+        intermediary in that time. httpx surfaces that as
+        `Server disconnected without sending a response` on the next use — a
+        transport failure, not a refusal, and one that succeeds immediately on a
+        fresh connection.
+
+        This is not a general retry policy. Only `TransportError` is retried,
+        and only once: a 4xx is a refusal that will be refused again, and every
+        write here is an idempotent upsert on a natural key, so re-sending one
+        that may already have landed cannot double-write.
+
+        Found by a real run, where a dropped connection during an escalation
+        took down a run that had already survived the error being escalated.
+        """
         token = await self._authenticate(client)
-        try:
-            response = await client.put(
-                f"{self.base_url}{path}",
-                json=payload,
-                headers={"Authorization": f"Bearer {token}"},
-            )
-        except httpx.HTTPError as exc:
-            raise CheckpointError(f"write-api unreachable for {path}: {exc}") from exc
-        if response.status_code != 200:
-            raise CheckpointError(
-                f"write-api refused {path}: {response.status_code} {response.text[:300]}"
-            )
+        url = f"{self.base_url}{path}"
+        headers = {"Authorization": f"Bearer {token}"}
+
+        for attempt in (1, 2):
+            try:
+                response = await client.put(url, json=payload, headers=headers)
+            except httpx.TransportError as exc:
+                if attempt == 1:
+                    logger.info("write-api connection dropped on %s; retrying once", path)
+                    continue
+                raise CheckpointError(f"write-api unreachable for {path}: {exc}") from exc
+            except httpx.HTTPError as exc:
+                raise CheckpointError(f"write-api unreachable for {path}: {exc}") from exc
+            if response.status_code != 200:
+                raise CheckpointError(
+                    f"write-api refused {path}: {response.status_code} {response.text[:300]}"
+                )
+            return
 
     async def save_run(self, state: RunState, *, client: httpx.AsyncClient) -> None:
         """Checkpoint the run. Called at every stage transition (§13)."""

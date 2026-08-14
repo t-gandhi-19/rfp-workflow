@@ -372,6 +372,10 @@ class RecordingCheckpointer:
     runs: list[RunState] = field(default_factory=list)
     statuses: list[tuple[str, QuestionStatus]] = field(default_factory=list)
     drafts: list[DraftedAnswer] = field(default_factory=list)
+    #: Statuses that fail to checkpoint. Models the write-api connection dying
+    #: mid-fan-out, which a live run proved takes the whole run down when it
+    #: happens on the ESCALATION path.
+    fail_status_writes: set[QuestionStatus] = field(default_factory=set)
 
     async def save_run(self, state: RunState, *, client: httpx.AsyncClient) -> None:
         self.runs.append(state.model_copy(deep=True))
@@ -384,6 +388,13 @@ class RecordingCheckpointer:
         status: QuestionStatus,
         client: httpx.AsyncClient,
     ) -> None:
+        if status in self.fail_status_writes:
+            from src.controller.checkpoint import CheckpointError
+
+            raise CheckpointError(
+                f"write-api unreachable for /v1/runs/{run_id}/questions/{question_id}/status: "
+                "Server disconnected without sending a response."
+            )
         self.statuses.append((question_id, status))
 
     async def save_draft(
