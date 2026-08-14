@@ -24,8 +24,16 @@ question_types:
     description: Team model, delivery centers, certifications held, partnerships.
   - key: commercial
     description: >-
-      Engagement model, governance, RACI, warranty process. Process only —
-      pricing is a hard block, see forbidden_content.
+      Engagement model, governance, RACI, warranty process. Process only.
+      Two different rules apply here and they are easy to confuse:
+      PRICING is never drafted at all — the guardrail hard-blocks it and the
+      question escalates unanswered.
+      WARRANTY and other legal-adjacent topics ARE retrieved and drafted
+      normally; the draft is then ALWAYS escalated by the forbidden-term
+      guardrail, because a legal commitment gets SME review before it is sent.
+      So "warranty" appearing in forbidden_content.legal does not mean the
+      workflow refuses the question — it means the answer never ships without a
+      human. See forbidden_content below.
 
 retrieval:
   # Hard drops applied inside the Cypher query, not after the fact — this is why
@@ -59,6 +67,10 @@ compliance:
         - '(?i)\bper\s+(?:hour|day|month|user|workload|seat)\b.*\d'
       reason: Pricing is never drafted by the workflow; a human owns commercials.
     legal:
+      # NOT a refusal. These questions are retrieved and drafted like any other;
+      # the draft is then escalated for SME review rather than sent. Contrast
+      # with `pricing` above, which is never drafted at all. QA-0039 in the
+      # synthetic corpus exists to exercise this path end to end.
       action: hard_block_escalate
       terms:
         - SLA

@@ -16,6 +16,8 @@ from dataclasses import dataclass
 
 import httpx
 
+from src.contracts.embedding import EmbedRole, apply_task_prefix
+
 
 class GatewayError(RuntimeError):
     """The gateway could not satisfy a request.
@@ -63,9 +65,16 @@ class GatewayClient:
         texts: list[str],
         *,
         alias: str,
+        role: EmbedRole,
         client: httpx.AsyncClient | None = None,
     ) -> list[list[float]]:
         """Embed texts through ``alias``, preserving input order.
+
+        `role` says whether these are stored documents or an incoming query, and
+        the task prefix is applied here — the one place it happens. It has no
+        default: embedding a query as a document produces a perfectly plausible
+        vector that quietly retrieves badly, which is precisely the failure this
+        parameter exists to prevent.
 
         `client` is injectable so tests can drive this against a mock transport
         without a live proxy.
@@ -73,7 +82,7 @@ class GatewayClient:
         if not texts:
             return []
 
-        payload = {"model": alias, "input": texts}
+        payload = {"model": alias, "input": apply_task_prefix(texts, role)}
         owned = client is None
         http = client or httpx.AsyncClient(timeout=self.timeout)
         try:

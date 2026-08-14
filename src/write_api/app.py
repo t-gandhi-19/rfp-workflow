@@ -24,6 +24,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import text
 
 from src.contracts import DraftedAnswer, EvalScore, QuestionStatus, RunState
+from src.retrieval.calibration import CalibrationArtifact
 from src.state.db import dispose_engine, get_engine
 from src.write_api import repository
 from src.write_api.auth import Principal, build_verifier, require_role
@@ -34,6 +35,7 @@ from src.write_api.settings import get_settings
 # role keeps that boundary enforced by the token rather than by convention.
 DRAFT_WRITER = "draft-writer"
 EVAL_WRITER = "eval-writer"
+KG_WRITER = "kg-writer"
 
 
 class Ack(BaseModel):
@@ -160,6 +162,27 @@ async def put_draft(
             conn, run_id=run_id, answer=answer, written_by=principal.subject
         )
     return Ack(written="draft", key=f"{run_id}/{question_id}", written_by=principal.subject)
+
+
+@app.post("/v1/calibration", response_model=Ack, tags=["retrieval"])
+async def post_calibration(
+    artifact: CalibrationArtifact,
+    principal: Annotated[Principal, Depends(require_role(KG_WRITER))],
+) -> Ack:
+    """Record the measured retrieval calibration (amendment J).
+
+    `kg-writer`, not `eval-writer`: this is produced by `make calibrate` at
+    ingest time, and the principal that populates the corpus is the one entitled
+    to state what its geometry measures. The eval harness consumes the floor; it
+    does not get to set it.
+    """
+    async with get_engine().begin() as conn:
+        await repository.upsert_calibration(conn, artifact, written_by=principal.subject)
+    return Ack(
+        written="calibration_artifacts",
+        key=f"{artifact.embed_model_tag}/{artifact.corpus_hash}",
+        written_by=principal.subject,
+    )
 
 
 @app.post("/v1/eval-results", response_model=Ack, tags=["evals"])

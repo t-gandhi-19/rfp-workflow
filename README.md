@@ -155,7 +155,9 @@ responses, so the quality gates are deterministic and free.
 | `make ingest` | Fixtures → graph (Phase 2) |
 | `make run FILE=...` | Run one RFP (Phase 4) |
 | `make resume RUN=...` | Resume an interrupted run (Phase 4) |
-| `make evals` | Eval harness + HTML report (Phase 3) |
+| `make evals` | Eval harness + HTML report → `out/evals.html` |
+| `make evals-full` | Same, rerank FORCED ON — the numbers of record |
+| `make evals-ablation` | Retrieval twice, rerank on and off, with deltas |
 | `make reembed` | Re-embed the corpus after a model change (Phase 2) |
 | `make explain RUN=...` | Plain-English run narrative (Phase 6) |
 | `make demo` | End-to-end on the golden RFP (Phase 5) |
@@ -176,6 +178,7 @@ src/
   guardrails/ deterministic post-processors      (Phase 4)
   write_api/  the only write path to Postgres
   mcp_server/ role-gated tools over the graph    (Phase 3)
+  observability/ app logging that survives uvicorn (Phase 3)
   gateway/    the only module allowed a provider SDK
   evals/      harness — built before the agents  (Phase 3)
 fixtures/     synthetic registry, Q&A corpus, golden RFP, answer key
@@ -221,6 +224,346 @@ thing already does.
 | 5 | `v0.5` | Adversarial suite, cost and latency reporting, `make demo` |
 | 6 | `v0.6` | Streamlit trust dashboard, log interpreter, audit wiring |
 
+## Decision register
+
+Decisions that shape what this system does and does not do. Earlier decisions
+(domain, providers, orchestration, gateway, vector store) are recorded in the
+build prompt and in the phase PRs; this register carries the ones taken during
+the build that a reader would otherwise have to infer from code.
+
+### D16 — LLM-judge-only quality evaluation
+
+**Decision.** Quality evals are scored by `judge-model` alone. The fixed
+human spot-check sample and the judge-vs-human agreement metric are removed from
+the eval spec and are **not** implemented.
+
+**Compensating controls, all mandatory:**
+
+1. The judge resolves to a **different model family** than the drafter, so a
+   model never grades its own prose (self-preference mitigation).
+2. The judge prompt and the rubric are **versioned files**, and the version is
+   logged on every judge span — a score is always attributable to the exact text
+   that produced it.
+3. Every judge score **attaches to the run trace** with the judged text's span
+   ids, so any score can be audited after the fact rather than taken on trust.
+4. The **deterministic zero-tolerance evals** — grounding coverage, entity
+   existence, staleness, rejection, confidentiality, compliance — are unaffected.
+   They never depended on human judgment, and they carry the trust load.
+
+**Accepted risk, stated plainly.** Judge scores are uncalibrated against human
+opinion. A systematic judge bias would be invisible until a human looks. This is
+accepted for v1 scope.
+
+**Scope.** This removes the human from the *evaluation harness only*. It does not
+touch the pipeline's human review stage, the SME escalation path, the
+no-auto-submission rule, or the never-granted `submitter` role — those remain
+CLAUDE.md golden rules and are unaffected. Human review is still the terminal
+stage of every run.
+
+### D19 addendum / amendment S — self-consistency is not agreement
+
+**The canary had a blind spot, and it was structural.** D19 replaced a
+distribution proxy with a probe-based ratchet: `make calibrate` lands the twenty
+golden questions on the freshly derived floor and checks each falls on the
+correct side. It was described as "the zero-tolerance eval core embedded into
+calibration", and it could not see the most serious defect this phase found.
+
+`scripts/calibrate` embeds the corpus, takes dot products, derives a floor, and
+lands its probes — all with the same arithmetic. Retrieval judges scores that
+come out of the Neo4j vector index, which returns `(1 + cos) / 2` for a cosine
+index. **The floor was derived in one unit and applied in another.** The
+background *median* cosine of 0.4930 arrived at the floor as 0.7465, calibrated
+to 0.9092, and cleared a floor of 0.5975 — so the floor rejected nothing, and
+all twenty golden questions MATCHED including the three the corpus cannot
+answer. Recall@5 was 0.2667 while every guard reported green.
+
+The probe gate saw none of it because it never reads the index. It was entirely
+self-consistent, and consistently wrong against production.
+
+**The general rule, which is the decision:**
+
+> When two subsystems must agree on a unit or a scale, an agreement test exists
+> **between** them. A check that shares its inputs with the thing it checks can
+> only prove self-consistency, and self-consistency is not agreement.
+
+**Implemented as four things, so the class is closed rather than the instance:**
+
+1. `src/retrieval/units.py` — samples a fixed set of committed pairs, computes
+   similarity by direct dot product **and** through the live index, and refuses
+   if they differ by more than ε. Runs inside `make calibrate` (fatal, before
+   the artifact is written) and inside `make preflight` (cheap: 3 probes, 5
+   neighbours, no model call). Failure prints both observed values and names
+   both paths.
+2. ε = 1e-2, derived in the module. float32's roundoff bounds the disagreement
+   at ~9.2e-5; **measurement exceeds that** — up to 2.5e-3 across the 15 pairs
+   sampled — consistent with the index scoring on a reduced-precision
+   representation. So ε is set from what the check must *discriminate*: the two
+   competing unit hypotheses are separated by ≥ 0.1 for any non-duplicate pair,
+   making 1e-2 about 4× the worst observation and ≥ 10× tighter than the fault.
+   A future sample approaching ε is a finding for this register, not a number to
+   raise.
+3. The conversion exists at **exactly one site**, asserted by a repo-wide AST
+   scan (`tests/security/test_units_conversion_single_site.py`). Applied twice
+   it inverts the scale; applied to an already-converted cosine it reproduces
+   the original defect.
+4. An integration test lands D19 probe 2.7 through **both** paths and requires
+   the margins to agree within 0.05 — twice the largest of the corroboration
+   deltas measured when the fix landed (0.0026, 0.0030, 0.0060, 0.0141, 0.0246).
+   The margin, not the cosine, is what tier 2 gates on.
+
+**What this does not claim.** The probe gate is still worth having; it catches
+corpus and model drift, which an agreement test cannot. The two are
+complementary, and the lesson is about what a guard's *inputs* let it see.
+
+**Corollary, adopted as a rule: reorder, do not add a skip flag.** Adding the
+agreement check broke CI's step order — commissioning ran before ingest, when
+the index is empty, so the check refused correctly in the wrong place. The
+tempting fix is `--skip-units-check` for that one step. That flag is the thing
+that gets reached for later, by someone with less context and more urgency, and
+an empty sample staying a *failure* is precisely the property that stops this
+guard passing vacuously. The steps were reordered instead: populate, commission,
+then enforce.
+
+### D17 addendum — the protected sliver is measured and accepted
+
+D17 split **relevance** (does this candidate qualify?) from **preference** (which
+of the qualifying ones wins), so that preference could reorder comparable
+candidates without overturning relevance outright. Reworking the scoring tests
+onto the commissioned band measured how much protection that actually leaves,
+and the answer was not the one the config claimed.
+
+**Measured, on corpus `a3d1eea3a24d6cb7` against `nomic-embed-text:v1.5`:**
+
+| Quantity | Value | Derivation |
+|---|---|---|
+| Achievable preference range | `[0.765, 1.265]` | worst `0.85 × 1.0 × 0.90`, best `1.15 × 1.1 × 1.00` |
+| Configured clamps | `[0.75, 1.30]` | **never bind** — the product cannot reach either |
+| Stated inversion boundary | 1.7333 | `clamp_max / clamp_min`, so it inherits the clamps' inertness |
+| **Real inversion boundary** | **1.6536** | `1.265 / 0.765` |
+| Widest ratio between two above-floor candidates | 1.6735 | `1.0 / 0.5975` |
+| **Protected sliver** | **0.0200** | `1.6735 − 1.6536` |
+
+**Decision: accepted as design, not a defect.** A candidate above the floor is by
+definition a match; preference deciding among matches is precisely D17's intent,
+not a failure of it. The invariant's real work is at the **floor boundary** — the
+line between answering and escalating — and the commissioned probe margins show
+it holding there with room to spare: the three unanswerables sit 0.3055, 0.2805
+and 0.1731 *below* the floor, the weakest answerable 0.2405 *above* it.
+
+The sliver is what remains above the floor, where both candidates already
+qualify and the stakes are ordering rather than qualification.
+
+**No constant moves without an observed failure.** The clamps stay, now commented
+as inert belt-and-braces that would bind only if the component multipliers
+changed. `scoring.yaml`'s boundary comment is corrected from 1.733 to the
+achievable 1.6536 with its derivation.
+
+**Enforcement.** `TestOrderingInTheCommissionedBand::test_the_preference_inversion_boundary_from_both_sides`
+drives the achievable boundary from both sides; testing 1.733 would assert a
+boundary the code cannot reach and would pass whether or not the real one held.
+`test_the_configured_clamps_never_actually_bind` pins the inertness, so a change
+to the multipliers that makes the clamps live fails loudly.
+
+#### The golden-1.1 inversion — observed, ruled on, gated
+
+The sliver stopped being theoretical. Running the retrieval eval with **rerank
+off**, golden 1.1 — *"Describe the team model you would deploy… including named
+leadership roles"* — ranked:
+
+| rank 1 | answer | outcome | relevance | preference | final |
+|---|---|---|---|---|---|
+| with preference | **ANS-0032** (RACI model) | won | 0.8247 | ×1.1952 | 0.9857 |
+| without preference | **ANS-0037** (team model) | lost | 1.0000 | ×0.9046 | 0.9046 |
+
+The hand-written key names ANS-0037 "the only direct team-model answer", so
+ANS-0032 is **not** a valid substitute. The relevance ratio was 1.21 — inside the
+1.6536 achievable bound — so this is the sliver arithmetic behaving exactly as
+predicted, on a case where it should not have.
+
+**Classification: a masked finding.** Recall@5 reported 1.0000 throughout,
+because ANS-0037 sat at rank 2. Only the preference-decisive diagnostic — which
+gates nothing — noticed.
+
+**Identity worth recording:** the MRR delta that failed the ablation's AND rule
+*is* this one flip, `(1 − 0.5) / 15 = 0.0333`. The ablation decision and this
+finding are one phenomenon; the 33 minutes of rerank buy this specific
+correction.
+
+**Two things change:**
+
+1. **`rank1_accuracy` becomes a gated harness metric**, commissioned by ratchet
+   at the shipped configuration's current 15/15. Rank 1 is the drafter's primary
+   source — the citation, and the input to the confidence formula — and Recall@5
+   is structurally blind to a wrong one. This is the eval that would have caught
+   1.1 without the diagnostic's luck.
+2. **The rerank coupling is recorded in `scoring.yaml`**, where the next
+   decision will be made: any future proposal to disable rerank re-evaluates this
+   finding first, not only the deltas.
+
+**One thing deliberately does not change: no preference constant moves.** One
+observation, in a non-shipped arm, corrected by the shipped configuration, now
+gated. Narrowing the specified ±15% outcome multipliers to protect a 1.21 ratio
+would gut preference's intended role over a single masked instance. The stance
+above holds — accepted, measured, documented, and now gated.
+
+If `rank1_accuracy` ever fails **in the shipped configuration**, that is the
+observed failure that reopens the preference-span question, and it is escalated
+with the candidate pair.
+
+### The audit trail that was not there
+
+**Found by the first test that read the container's log instead of the source.**
+mcp-server logs the caller's subject, the tool and the outcome on every call —
+the record of who asked the graph for what, and the only after-the-fact evidence
+that a retrieval did or did not surface confidential material. In the running
+container, none of it was emitted.
+
+Uvicorn installs its own `dictConfig`, which attaches handlers to the `uvicorn*`
+loggers and leaves the ROOT logger bare. An application logger propagates to a
+root with no handlers, and Python's last-resort handler passes WARNING and above
+— so every `logger.info` in the codebase was discarded, silently, in exactly the
+environment it was written for.
+
+**Why nothing caught it.** A `caplog` test would have passed throughout, because
+pytest attaches its own root handler. The logging call was present and correct;
+the *handler wiring around it* was missing, and that wiring only exists in a
+deployed process. This is the general form of the case for asserting against the
+running service: in-process tests of configuration substitute their own
+configuration.
+
+**The fix** is `src/observability/logging.py` — one stdout handler on the `rfp`
+tree, attached from the service lifespan (not at import: uvicorn configures
+logging *after* importing the app). The split is deliberate:
+`tests/unit/test_app_logging.py` asserts the wiring properties, and
+`TestTheCallerIsInTheLog` in the integration suite asserts the container's own
+log actually contains `subject=`. Neither substitutes for the other.
+
+**A skip nearly hid it a second time.** That integration test skipped on the
+build host, where the Linux `docker` shim on the WSL PATH exits non-zero without
+Docker Desktop's WSL integration. Resolving `docker.exe` first — the name that
+answers there, and one that does not exist on a Linux runner — turned the skip
+into a run. A skipped assertion is an unverified claim, and this was the only
+assertion that the audit trail existed at all.
+
+### Two defects the eval harness found in itself
+
+Both were in the scoreboard rather than in a measurement, and both would have
+degraded quietly rather than failed loudly. Recorded because the shape recurs:
+*the code that records results is not covered by the results it records.*
+
+**`GIT_SHA` answered the wrong question.** The harness keyed every local run to
+`local-dev`, because `.env` sets `GIT_SHA=local-dev` so a CONTAINER can report
+its build, and `git_sha()` consulted the environment before git. One variable
+name, two different questions — "what build is this container?" and "what commit
+produced these numbers?" — and a SHA-keyed scoreboard where every row shares one
+key answers neither. In a checkout only git can answer the second, so git is now
+asked first and `GIT_SHA` is the fallback for running outside one.
+
+**The baseline lookup named a driver the project does not ship.** `postgresql+
+asyncpg`, hand-assembled, when everything else here uses `psycopg` via
+`src/state/db.py`'s `reader_url()`. It cost a 35-minute rerank-ON run: the
+baseline is read AFTER every expensive measurement, so it took the whole run
+down at the final step with all the work done and nothing written.
+
+The second half of that fix matters more than the first. `create_async_engine`
+sat ABOVE the `try` that exists to turn "no baseline" into a report line, so a
+bad URL raised straight past the handler written to absorb it. Construction is
+now inside. And the handler no longer swallows silently — it logs what went
+wrong, because a baseline that vanishes without a word is indistinguishable from
+a fresh clone, and only one of those is a defect.
+
+A third, smaller one: `eval_results` is not the harness's private table. The
+integration suite writes rows keyed `integration` and `itest-*` to prove the
+write path, and those were candidate baselines for every real run — so running
+the test suite changed what the scoreboard said about the code. The baseline
+query now considers only commit-shaped keys.
+
+### A port is not an identity
+
+Amendment B requires a fresh clone to be **green with skips, never red**. It was
+not. Running the whole suite from a clean worktree with no `.env` produced 38
+errors:
+
+```
+neo4j.exceptions.AuthError: {code: Neo.ClientError.Security.Unauthorized}
+{message: Unsupported authentication token, missing key `credentials`}
+```
+
+`require_neo4j` probed a raw TCP port and nothing else. With no `.env` the port
+defaults to 7687 — and on the build host, which runs a second project's stack
+(hence the 5xxxx overrides in `.env`), **something is listening there.** The
+probe succeeded against a database belonging to somebody else, and 38 tests then
+failed for a reason that says nothing about this repository.
+
+The probe now requires `NEO4J_PASSWORD` alongside the port, exactly as
+`require_write_api_and_keycloak` already required its service-account secrets.
+That does not make a TCP probe prove identity — nothing cheap does. It makes the
+*unloaded environment* case, which is the reachable one, report itself as
+"environment not loaded" instead of as a wall of authentication failures.
+Clean-worktree full run afterwards: **1084 passed, 119 skipped.**
+
+This is the same shape as the `docker` shim two sections up, and as the CI
+embedder before it: a check that answered a question adjacent to the one being
+asked. "Is the port open" is not "is our database there", just as "is `docker` on
+the PATH" is not "can this shell reach the daemon".
+
+**Found only because amendment R's clean-worktree run was done in full.** The
+unit+security form of it — the form habitually run — is green on that same
+checkout, because the failure needs the integration suite and an unloaded
+environment at once.
+
+### Working rules, earned and adopted
+
+Two rules generalised out of the amendment-S fallout at `b555ea6`. Both are
+stated as one-liners because both are cheap to apply and expensive to relearn.
+
+**Declarations, not workarounds.** *A test environment declares its stand-ins;
+a call site that hardcodes the stand-in hides the missing declaration.* CI's
+integration job ingested its graph with the stand-in embedder and then never
+said so, because every existing test called `fake_embedding(...)` directly
+instead of asking the environment. The gap was structurally invisible: no test
+that hardcodes the answer can notice the question was never asked. The fix
+exports `RFP_FAKE_EMBEDDINGS=1` — not to silence a failure, but to make the
+environment state a fact that was already true of the data. The test for
+"is this a workaround?" is whether the declaration would still be correct if
+the failing test did not exist.
+
+**One test, one question.** *A test that can fail for two reasons reports
+neither.* The first probe-agreement test re-embedded the corpus for its direct
+path, so it asked the units question *and* "does the query embedder match the
+one the graph was built with" — two real failure modes sharing one message.
+Reading document vectors from the graph for both paths leaves direct dot
+product versus index score as the only difference, which is the single thing
+amendment S is about. Splitting is not test-count vanity: it is what makes a
+red test a diagnosis instead of a starting point.
+
+## The eval harness
+
+`make evals` runs every implemented category, writes one self-contained HTML
+report to `out/evals.html`, persists the gated metrics to Postgres keyed by git
+SHA, and prints what moved since the previous SHA. It exits non-zero if any
+measured category fails, so it can gate.
+
+| Category | State | Judged against |
+|---|---|---|
+| extraction | implemented | `fixtures/answer_key_manual.json` — externally authored, builder-immutable |
+| retrieval | implemented | the hand-written key, over the twenty golden questions |
+| grounding | NOT_IMPLEMENTED | needs drafted prose (Phase 4) |
+| compliance | NOT_IMPLEMENTED | needs assembled responses (Phase 4) |
+| quality | NOT_IMPLEMENTED | needs the drafter and `judge-model` (Phase 4, per D16) |
+| adversarial | NOT_IMPLEMENTED | needs the full pipeline to attack (Phase 5) |
+
+Unimplemented categories are **named and greyed in the report, never omitted**,
+each stating the input it waits on. A category simply absent reads as "nothing to
+say about grounding"; a category greyed and named reads as "grounding is not
+measured yet". Only the second is true. They carry no metrics by construction —
+a zero in a placeholder would be persisted, differenced against the next SHA, and
+become an apparent regression on the day it was first really measured.
+
+The harness never edits a threshold, a calibration constant, or the manual answer
+key. A failing eval is a finding about the system, not a prompt to move the line
+it failed against.
+
 ## Testing
 
 ```bash
@@ -232,8 +575,88 @@ pytest -m integration           # requires `make up`
 
 CI runs on every push: ruff → mypy → unit and security tests → gitleaks → a
 compose smoke job that brings up the stack, applies migrations, and exercises a
-real client-credentials token against write-api (expecting 200, 401, and 403 in
-the right places).
+real client-credentials token against write-api and mcp-server (expecting 200,
+401, and 403 in the right places).
+
+### What CI proves, and what it does not
+
+CI has no Ollama (see [Local models](#local-models)), so it ingests and
+calibrates with a deterministic stand-in embedder. That makes the split between
+the two kinds of evidence in this repo load-bearing, so it is stated in one form
+everywhere it applies — here and in `src/gateway/fake_embedder.py`:
+
+> **CI proves the calibration and retrieval machinery end to end.
+> The real-model run quoted in every PR proves the semantics.**
+
+Neither substitutes for the other. A green CI says the guards compute, gate and
+refuse correctly on vectors whose geometry is known by construction — the
+separation guards run **enforcing**, with no exemption, against baselines CI
+commissions from its own vectors into a scratch config it cannot write back to.
+It says nothing whatever about whether retrieval finds the right answer, because
+those vectors carry no meaning.
+
+That question is settled only by the zero-tolerance retrieval evals on real
+embeddings, whose numbers every PR quotes. **No CI result may be quoted in their
+place.**
+
+#### Which eval categories CI actually measures
+
+The same split decides what `make evals` is allowed to claim in CI, and the
+answer differs per category rather than per job:
+
+- **Extraction runs for real in CI, and its numbers are the same as local.** It
+  parses the committed PDF and DOCX and compares against the externally-authored
+  manual key. No model, no database, no embeddings — nothing the stand-in
+  touches. Recall, precision, field accuracy, PDF/DOCX parity and the injection
+  flag are therefore CI-provable facts.
+- **Retrieval is deselected in CI**, with `--categories extraction`. Its inputs
+  are stand-in vectors, so a Recall@5 or a rank-1 accuracy measured there is a
+  number about nothing, and gating a build on it would be gating on noise. The
+  report marks the category **DESELECTED** rather than NOT_IMPLEMENTED, because
+  "this run did not execute it" and "this code does not exist" are different
+  facts.
+
+**Open, and deliberately not papered over:** running retrieval under CI would
+need a recorded rerank set keyed by question id. Recordings captured locally
+would not match CI's candidate counts — CI's stand-in vectors produce different
+candidate sets, and `parse_rerank_response` rejects a reply whose index count
+disagrees. Fabricating fixtures to fill that gap would put invented data behind
+a number the report presents as measured, so the category is deselected and the
+gap is written down instead.
+
+#### Ruling: DESELECTED stands, and nothing is lost by it
+
+Deselecting the retrieval category costs CI **none of its actual coverage**, and
+saying so precisely matters more than the label:
+
+- **The retrieval machinery is proved in CI, through two other routes.** The
+  integration suite exercises the real query functions against a real Neo4j
+  holding the ingested corpus — vector search, the confidentiality filter,
+  supersession, paraphrase exclusion, the units agreement between calibration
+  and the index — and, since Phase 3, through the mcp-server tool boundary as
+  well. Separately, `make calibrate` runs with **both separation tiers
+  enforcing** against baselines CI commissions from its own vectors. What CI
+  cannot do is judge *semantic* retrieval quality.
+- **The retrieval category's numbers are real-model numbers of record, by
+  design.** This is the epistemic split this repo already applies everywhere
+  else, applied once more: *CI proves the machinery end to end; the real-model
+  run quoted in the PR proves the semantics.* A Recall@5 or a rank-1 accuracy
+  computed over vectors with no semantics is not a weaker version of the real
+  number — it is a number about a different thing, and publishing it in the same
+  column would invite exactly the substitution the split exists to forbid.
+
+So the label is not an apology. `DESELECTED` says the code exists and this
+invocation chose not to run it; `NOT_IMPLEMENTED` says the code does not exist.
+Only the first is true of retrieval in CI.
+
+**Named open question, for a fast-follow rather than this PR.** A deterministic
+CI recording set *is* feasible: the v3 stand-in embedder is a pure function of
+the fixtures, so CI's candidate sets are deterministic, and a record-mode run
+under the double could capture rerank replies that match CI's own candidate
+counts — with CI-labelled baselines, distinct from the commissioned ones. Worth
+doing only alongside a report label that keeps **CI-world numbers visually
+distinct from the numbers of record**; a stand-in Recall@5 sitting unmarked in
+the same table as a real one would undo the split this whole section defends.
 
 ## Changelog
 

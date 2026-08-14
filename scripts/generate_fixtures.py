@@ -40,10 +40,13 @@ from scripts.fixtures.corpus import (
     CLOSING_SENTENCES,
     EVIDENCE_SENTENCES,
     GOVERNANCE_SENTENCES,
+    PARAPHRASES,
     RISK_SENTENCES,
     TOPICS,
     Topic,
+    family_of,
 )
+from src.retrieval.calibration import BAITS, UNANSWERABLE
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 FIXTURES = REPO_ROOT / "fixtures"
@@ -235,6 +238,11 @@ def generate_qa_pairs() -> list[dict[str, Any]]:
                 "question_id": f"HQ-{index + 1:04d}",
                 "answer_id": f"ANS-{index + 1:04d}",
                 "topic_key": topic.key,
+                # The SUBJECT, as opposed to the record. `topic_key` is unique and
+                # is what the golden source joins through; `topic_family` groups
+                # the two halves of a supersession chain, and is what calibration
+                # means by "the same question".
+                "topic_family": family_of(topic),
                 "question": topic.question,
                 "answer": answer_text,
                 "domain": "cloud_migration",
@@ -277,32 +285,121 @@ def generate_qa_pairs() -> list[dict[str, Any]]:
     return sorted(pairs, key=lambda p: p["id"])
 
 
+def generate_paraphrases(pairs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Alternate phrasings of existing corpus questions.
+
+    A paraphrase is a QUESTION, not a Q&A pair. It carries no answer of its own —
+    it points at the answer the original question already has, which is what
+    makes it safe to add: the corpus still holds 40 answers, so nothing new
+    competes for a ranking and the golden expectations are untouched.
+
+    They exist for calibration. The floor is derived from what "genuinely the
+    same question" scores, and before these the corpus had nothing to measure
+    that on: its only same-subject pairs were four supersession chains with
+    byte-identical question text.
+
+    Every family gets the same number of them, so no subject is weighted more
+    heavily than another in the resulting statistics.
+    """
+    families = sorted({pair["topic_family"] for pair in pairs})
+    missing = [family for family in families if family not in PARAPHRASES]
+    extra = sorted(set(PARAPHRASES) - set(families))
+    if missing or extra:
+        raise ValueError(
+            f"PARAPHRASES must cover exactly the topic families. "
+            f"Missing: {missing or 'none'}. Unknown: {extra or 'none'}."
+        )
+
+    counts = {len(value) for value in PARAPHRASES.values()}
+    if len(counts) != 1:
+        raise ValueError(
+            f"every family must supply the same number of paraphrases, got sizes {sorted(counts)}; "
+            "an uneven count would weight some subjects more heavily in the calibration statistics"
+        )
+
+    # The head of a family owns the paraphrases: for a supersession chain that is
+    # the v2, because a paraphrase pointing at a retired answer would put text in
+    # the index whose only match is something retrieval is supposed to suppress.
+    head_by_family: dict[str, dict[str, Any]] = {}
+    for pair in sorted(pairs, key=lambda p: p["id"]):
+        if pair["superseded_by"] is None:
+            head_by_family[pair["topic_family"]] = pair
+
+    rows: list[dict[str, Any]] = []
+    for family in families:
+        head = head_by_family[family]
+        for offset, text in enumerate(PARAPHRASES[family]):
+            index = len(rows) + 1
+            rows.append(
+                {
+                    "id": f"QP-{index:04d}",
+                    "question_id": f"HQP-{index:04d}",
+                    "topic_key": f"{family}-para-{offset + 1}",
+                    "topic_family": family,
+                    "paraphrase_of": head["question_id"],
+                    "answer_id": head["answer_id"],
+                    "question": text,
+                    "normalized_question": " ".join(text.split()),
+                    "domain": head["domain"],
+                    "question_type": head["question_type"],
+                    "capability_id": head["capability_id"],
+                    "customer": head["customer"],
+                }
+            )
+
+    seen = [row["question"] for row in rows]
+    if len(set(seen)) != len(seen):
+        raise ValueError("paraphrase question text must be unique across the corpus")
+    originals = {pair["question"] for pair in pairs}
+    collisions = sorted(originals.intersection(seen))
+    if collisions:
+        raise ValueError(
+            f"paraphrases must not restate an original question verbatim: {collisions}"
+        )
+    return sorted(rows, key=lambda r: r["id"])
+
+
 # ---------------------------------------------------------------------------
 # Golden RFP
 # ---------------------------------------------------------------------------
 
 
 def golden_source() -> dict[str, Any]:
-    """The one structure both renderers consume."""
+    """The one structure both renderers consume.
+
+    The injection string is planted here rather than in the question list, so
+    the carrier is picked by deterministic rule instead of being hand-assigned.
+    The carrier keeps its expected match: a tampered question is still an
+    ordinary question, and the system must answer it while refusing to follow
+    the instruction buried in it.
+    """
+    carrier = golden.injection_carrier()
+    questions: list[dict[str, Any]] = []
+    for question in sorted(golden.QUESTIONS, key=lambda q: q.order):
+        is_carrier = question.id == carrier.id
+        questions.append(
+            {
+                "id": question.id,
+                "order": question.order,
+                "section": question.section,
+                "number": question.number,
+                "text": (
+                    f"{question.text} {golden.INJECTION_STRING}" if is_carrier else question.text
+                ),
+                "question_type": question.question_type,
+                "mandatory": question.mandatory,
+                "word_limit": question.word_limit,
+                "expects_match": question.expects_match,
+                "trap": "injection" if is_carrier else question.trap,
+            }
+        )
+
     return {
         "cover": dict(golden.COVER),
         "sections": list(golden.SECTIONS),
         "injection_string": golden.INJECTION_STRING,
-        "questions": [
-            {
-                "id": q.id,
-                "order": q.order,
-                "section": q.section,
-                "number": q.number,
-                "text": q.text,
-                "question_type": q.question_type,
-                "mandatory": q.mandatory,
-                "word_limit": q.word_limit,
-                "expects_match": q.expects_match,
-                "trap": q.trap,
-            }
-            for q in sorted(golden.QUESTIONS, key=lambda q: q.order)
-        ],
+        "injection_carrier_question_id": carrier.id,
+        "questions": questions,
     }
 
 
@@ -473,10 +570,14 @@ def build_answer_key(pairs: list[dict[str, Any]], source: dict[str, Any]) -> dic
                 "expected_best_match_answer_id": expected["answer_id"] if expected else None,
                 "expected_status": "NO_MATCH" if expected is None else "MATCHED",
                 "expected_escalation": question["trap"] != "none" or expected is None,
+                # A trap names the ONE failure mode that question exists to
+                # exercise. Two traps on one question would let a regression in
+                # either hide behind the other firing.
                 "expected_guardrail": {
                     "unanswerable": "escalate_no_match",
                     "legal": "legal_hard_block",
                     "pricing": "pricing_hard_block",
+                    "forbidden_term": "forbidden_term_escalate",
                     "injection": "injection_flagged",
                     "none": None,
                 }[question["trap"]],
@@ -490,6 +591,9 @@ def build_answer_key(pairs: list[dict[str, Any]], source: dict[str, Any]) -> dic
         "deadline": source["cover"]["deadline"],
         "question_count": len(questions),
         "questions": questions,
+        # Named explicitly so the injection eval asserts the flag and pattern on
+        # THIS question, rather than inferring "something escalated somewhere".
+        "expected_injection_question_id": source["injection_carrier_question_id"],
         "superseded_answer_ids": sorted(superseded_answer_ids),
         "expected_escalation_question_ids": sorted(
             q["question_id"] for q in questions if q["expected_escalation"]
@@ -514,20 +618,101 @@ def build_answer_key(pairs: list[dict[str, Any]], source: dict[str, Any]) -> dic
 # ---------------------------------------------------------------------------
 
 
+#: Weight of the family anchor in the CI stand-in embedder (amendment N).
+#:
+#: Lives here, with the lookup it is used against, because the two are one
+#: artifact: the anchors are only meaningful for texts the lookup can place, and
+#: a weight stored apart from the mapping could drift out of step with it.
+#:
+#: 0.7 puts the family signal firmly in charge while leaving the token bag enough
+#: room to keep same-family texts distinguishable from one another. It is a CI
+#: knob and nothing else — no production path reads it.
+FAMILY_ANCHOR_WEIGHT = 0.7
+
+
+def normalize_question(text: str) -> str:
+    """Whitespace-collapsed lookup key, matching `normalized_question`."""
+    return " ".join(text.split())
+
+
+def generate_family_lookup(
+    pairs: list[dict[str, Any]], paraphrases: list[dict[str, Any]]
+) -> dict[str, Any]:
+    """Question text -> topic family, for the CI stand-in embedder (amendment N).
+
+    GENERATED WITH THE FIXTURES ON PURPOSE. The stand-in blends a per-family
+    anchor into each vector so that CI's calibration has real separation to
+    measure; that only works if every text the corpus contains can be placed in
+    its family. Generating the mapping here means a corpus change carries its
+    lookup with it, and `--check` fails if the committed copy has drifted.
+
+    Three populations, and the third is defined by ABSENCE:
+
+      originals + paraphrases  their own `topic_family`.
+      golden answerables       the family of the answer the key expects, so a
+                               golden question lands on its own subject.
+      unanswerables and baits  ABSENT. No family, so they embed as a pure token
+                               bag, which sits far from every anchor. That makes
+                               NO_MATCH a structural property of CI's geometry
+                               rather than something the fixture asserts.
+
+    The golden texts come from the hand-written key, which is read and never
+    written: it is independent ground truth (D16) and this is a consumer of it.
+    """
+    family_by_answer = {pair["answer_id"]: pair["topic_family"] for pair in pairs}
+
+    entries: dict[str, str] = {}
+    for row in [*pairs, *paraphrases]:
+        key = normalize_question(row["question"])
+        existing = entries.get(key)
+        if existing is not None and existing != row["topic_family"]:
+            raise ValueError(
+                f"question text maps to two families ({existing} and {row['topic_family']}): "
+                f"{key!r}. The anchor for that text would be ambiguous."
+            )
+        entries[key] = row["topic_family"]
+
+    with (FIXTURES / "answer_key_manual.json").open(encoding="utf-8") as handle:
+        manual = json.load(handle)
+
+    for question in manual["questions"]:
+        number = question["number"]
+        if number in UNANSWERABLE or number in BAITS:
+            continue
+        answer_id = question["expected_best_match_answer_id"]
+        if not answer_id:
+            continue
+        if answer_id not in family_by_answer:
+            raise ValueError(
+                f"golden question {number} expects {answer_id}, which no corpus pair owns"
+            )
+        entries[normalize_question(question["text"])] = family_by_answer[answer_id]
+
+    return {
+        "version": 1,
+        "config": {"family_anchor_weight": FAMILY_ANCHOR_WEIGHT},
+        "families": dict(sorted(entries.items())),
+    }
+
+
 def generate(root: Path) -> dict[str, Any]:
     generate_registry(root)
     pairs = generate_qa_pairs()
     source = golden_source()
+    paraphrases = generate_paraphrases(pairs)
 
     write_json(root / "qa_pairs.json", pairs)
+    write_json(root / "question_paraphrases.json", paraphrases)
     write_json(root / "golden_rfp_source.json", source)
     write_json(root / "answer_key.json", build_answer_key(pairs, source))
+    write_json(root / "fake_embedder_families.json", generate_family_lookup(pairs, paraphrases))
 
     render_docx(source, root / "golden_rfp.docx")
     render_pdf(source, root / "golden_rfp.pdf")
     render_response_template(root / "templates" / "response_template.docx")
 
     return {
+        "family_lookup_entries": len(generate_family_lookup(pairs, paraphrases)["families"]),
         "pairs": len(pairs),
         "outcomes": dict(Counter(p["outcome"] for p in pairs)),
         "types": dict(Counter(p["question_type"] for p in pairs)),
@@ -541,8 +726,10 @@ def check() -> int:
     """Regenerate into a temp directory and diff the byte-stable outputs."""
     stable = [
         "qa_pairs.json",
+        "question_paraphrases.json",
         "golden_rfp_source.json",
         "answer_key.json",
+        "fake_embedder_families.json",
         "registry/vendors.csv",
         "registry/products.csv",
         "registry/certifications.csv",

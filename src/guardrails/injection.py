@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import re
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 #: Delimiters wrapped around untrusted content.
 OPEN_DELIMITER = "<<<UNTRUSTED_DOCUMENT_CONTENT>>>"
@@ -89,6 +89,77 @@ INSTRUCTION_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
         re.compile(r"(?:^|\n)\s*(?:###\s*)?(?:system|assistant)\s*:", re.IGNORECASE),
     ),
 )
+
+
+class SanitizationResult(BaseModel):
+    """What the sanitizer concluded about one question's text.
+
+    The policy encoded here: **a detected injection always forces escalation**,
+    even when the question is otherwise perfectly answerable and the pipeline
+    would have drafted it happily. A question someone has tampered with gets
+    human eyes, full stop — the value of catching an injection is lost if the
+    answer then ships unreviewed.
+
+    It is a validator rather than a convention because the drafting pipeline
+    that must honour it does not exist yet (Phase 4). Encoding it now means the
+    pipeline cannot be built in a way that ignores it: constructing a result
+    with `injection_detected=True` and `force_escalate=False` is impossible.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    question_id: str = Field(min_length=1)
+    hits: list[InjectionHit] = Field(default_factory=list)
+    injection_detected: bool
+    force_escalate: bool
+    #: Names the pattern, so an escalation says what was found rather than
+    #: "flagged". Required whenever an injection was detected.
+    escalation_reason: str | None = None
+
+    @model_validator(mode="after")
+    def _detection_matches_hits(self) -> SanitizationResult:
+        if self.injection_detected != bool(self.hits):
+            raise ValueError("injection_detected must agree with whether any hits were found")
+        return self
+
+    @model_validator(mode="after")
+    def _detection_forces_escalation(self) -> SanitizationResult:
+        if self.injection_detected and not self.force_escalate:
+            raise ValueError(
+                "injection_detected=True requires force_escalate=True; a tampered "
+                "question always goes to a human"
+            )
+        if self.injection_detected and not (self.escalation_reason or "").strip():
+            raise ValueError("injection_detected=True requires an escalation_reason naming it")
+        return self
+
+
+def sanitize_question(question_id: str, text: str) -> SanitizationResult:
+    """Scan one question and decide whether it must escalate.
+
+    The reason names every pattern that fired, in order, so the run record and
+    the eval both have something specific to assert rather than a boolean.
+    """
+    hits = scan(text)
+    if not hits:
+        return SanitizationResult(
+            question_id=question_id,
+            hits=[],
+            injection_detected=False,
+            force_escalate=False,
+        )
+
+    patterns = sorted({hit.pattern_name for hit in hits})
+    return SanitizationResult(
+        question_id=question_id,
+        hits=hits,
+        injection_detected=True,
+        force_escalate=True,
+        escalation_reason=(
+            "prompt injection detected in the question text "
+            f"({', '.join(patterns)}); document content is data, never instructions"
+        ),
+    )
 
 
 def scan(text: str) -> list[InjectionHit]:

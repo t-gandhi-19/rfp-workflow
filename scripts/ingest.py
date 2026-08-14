@@ -25,7 +25,7 @@ from typing import Any
 
 from neo4j import AsyncSession
 
-from src.contracts.embedding import embedding_config
+from src.contracts.embedding import EmbedRole, embedding_config
 from src.gateway.client import GatewayClient
 from src.gateway.fake_embedder import fake_embeddings, fake_embeddings_enabled
 from src.graph.driver import close_driver, get_driver, normalise_name
@@ -47,6 +47,12 @@ def load_pairs() -> list[dict[str, Any]]:
     with (FIXTURES / "qa_pairs.json").open(encoding="utf-8") as handle:
         data: list[dict[str, Any]] = json.load(handle)
     return sorted(data, key=lambda pair: pair["id"])
+
+
+def load_paraphrases() -> list[dict[str, Any]]:
+    with (FIXTURES / "question_paraphrases.json").open(encoding="utf-8") as handle:
+        data: list[dict[str, Any]] = json.load(handle)
+    return sorted(data, key=lambda row: row["id"])
 
 
 # ---------------------------------------------------------------------------
@@ -150,6 +156,51 @@ MATCH (o:Outcome {value: row.outcome})
 MERGE (a)-[:RESULTED_IN]->(o)
 """
 
+# A paraphrase is an alternate PHRASING of an existing question, not a new Q&A
+# pair. It gets a Question node and points at the answer the original already
+# has, so the corpus still holds 40 answers and nothing new competes for a rank.
+#
+# It is ASKED_IN the SAME RFP as the question it rephrases, and that is load
+# bearing rather than tidy: `find_similar_questions` decides confidentiality by
+# walking (question)-[:ASKED_IN]->(:RFP)-[:ISSUED_BY]->(owner). A paraphrase of
+# the confidential question hung off a different customer's RFP would make the
+# confidential answer reachable through the paraphrase — a leak by way of a
+# synonym.
+MERGE_PARAPHRASES = """
+UNWIND $rows AS row
+MERGE (cust:Customer {name: row.customer})
+MERGE (rfp:RFP {id: row.rfp_id})
+MERGE (rfp)-[:ISSUED_BY]->(cust)
+MERGE (d:Domain {key: row.domain})
+MERGE (q:Question {id: row.question_id})
+  // AMENDMENT P. The second label is what keeps a paraphrase out of the
+  // retrieval candidate space. It carries no answer of its own — it points at
+  // the one its original already has — so a paraphrase surfacing as a candidate
+  // would be a duplicate of a result already in the list, competing with it for
+  // a rank it cannot deserve.
+  //
+  // A LABEL rather than a property because it is what the node IS, and because
+  // `QUESTIONS_TO_EMBED` can then exclude it without reading a field that a
+  // future writer might forget to set. Belt and braces: the label keeps them out
+  // of the vector index at all, AND `find_similar_questions` filters on it, so
+  // neither an accidental re-embed nor a new query can put one in a result.
+  SET q:Paraphrase,
+      q.text = row.question, q.normalized_text = row.normalized_question,
+      q.domain = row.domain, q.question_type = row.question_type,
+      q.paraphrase_of = row.paraphrase_of
+MERGE (q)-[:ASKED_IN]->(rfp)
+MERGE (q)-[:BELONGS_TO]->(d)
+WITH q, row
+MATCH (cap:Capability {id: row.capability_id})
+MERGE (q)-[:BELONGS_TO]->(cap)
+WITH q, row
+MATCH (a:Answer {id: row.answer_id})
+MERGE (q)-[:ANSWERED_BY]->(a)
+WITH q, row
+MATCH (original:Question {id: row.paraphrase_of})
+MERGE (q)-[:PARAPHRASE_OF]->(original)
+"""
+
 MERGE_EVIDENCE = """
 UNWIND $rows AS row
 MATCH (a:Answer {id: row.answer_id})
@@ -171,11 +222,34 @@ MATCH (q:Question {id: row.question_id})
 SET q.embedding = row.embedding
 """
 
+# Amendment P: paraphrases are calibration-only and never enter the vector
+# index. Calibration embeds them itself, from the fixtures, because it needs
+# them on the QUERY side — a paraphrase models an unseen phrasing arriving in a
+# new RFP. It never needs them on the document side, which is exactly what being
+# absent from the index means.
+#
+# This is also what the shipped calibration artifact already describes: its
+# population is `query:any_family_member x document:indexed_originals`, and
+# `calibration_corpus()` marks every paraphrase `indexed: False`. Until this
+# clause existed the graph disagreed with that artifact — 148 questions were
+# embedded where the statistics assumed 40.
 QUESTIONS_TO_EMBED = """
 MATCH (q:Question)
-WHERE $force OR q.embedding IS NULL
+WHERE NOT q:Paraphrase
+  AND ($force OR q.embedding IS NULL)
 RETURN q.id AS question_id, q.normalized_text AS text
 ORDER BY question_id ASC
+"""
+
+#: Amendment P is retroactive: a graph ingested before it exists holds paraphrase
+#: vectors that are still in the index. Skipping them from now on would leave the
+#: old ones in place — invisible, and exactly the candidates the amendment
+#: forbids — so ingest clears them rather than assuming a clean volume.
+CLEAR_PARAPHRASE_EMBEDDINGS = """
+MATCH (q:Question:Paraphrase)
+WHERE q.embedding IS NOT NULL
+REMOVE q.embedding
+RETURN count(q) AS cleared
 """
 
 
@@ -188,13 +262,15 @@ async def _embed(texts: list[str]) -> list[list[float]]:
     """Embed through the gateway, or with the CI stand-in when opted in."""
     dimensions = embedding_config().model.dimensions
     if fake_embeddings_enabled():
-        return fake_embeddings(texts, dimensions)
+        return fake_embeddings(texts, dimensions, role=EmbedRole.DOCUMENT)
 
     client = GatewayClient.from_env()
     alias = embedding_config().model.alias
     vectors: list[list[float]] = []
     for start in range(0, len(texts), BATCH):
-        vectors.extend(await client.embed(texts[start : start + BATCH], alias=alias))
+        vectors.extend(
+            await client.embed(texts[start : start + BATCH], alias=alias, role=EmbedRole.DOCUMENT)
+        )
 
     bad = [len(vector) for vector in vectors if len(vector) != dimensions]
     if bad:
@@ -312,6 +388,35 @@ async def ingest_pairs(session: AsyncSession, pairs: list[dict[str, Any]]) -> No
         await session.run(MERGE_SUPERSESSION, rows=chains)
 
 
+async def ingest_paraphrases(session: AsyncSession, paraphrases: list[dict[str, Any]]) -> None:
+    """Alternate phrasings, attached to the answer their original already has."""
+    customers = {row["name"]: row["id"] for row in load_csv("customers.csv")}
+    rows = [
+        {
+            "rfp_id": f"HRFP-{customers[row['customer']]}",
+            "question_id": row["question_id"],
+            "question": row["question"],
+            "normalized_question": row["normalized_question"],
+            "domain": row["domain"],
+            "question_type": row["question_type"],
+            "capability_id": row["capability_id"],
+            "customer": row["customer"],
+            "answer_id": row["answer_id"],
+            "paraphrase_of": row["paraphrase_of"],
+        }
+        for row in paraphrases
+    ]
+    if rows:
+        await session.run(MERGE_PARAPHRASES, rows=rows)
+
+
+async def clear_paraphrase_embeddings(session: AsyncSession) -> int:
+    """Remove any paraphrase vectors left by a pre-amendment-P ingest."""
+    result = await session.run(CLEAR_PARAPHRASE_EMBEDDINGS)
+    record = await result.single()
+    return int(record["cleared"]) if record else 0
+
+
 async def embed_questions(session: AsyncSession, *, force: bool) -> int:
     result = await session.run(QUESTIONS_TO_EMBED, force=force)
     pending = [record.data() async for record in result]
@@ -329,12 +434,15 @@ async def embed_questions(session: AsyncSession, *, force: bool) -> int:
 
 async def run(*, reembed_only: bool) -> int:
     pairs = load_pairs()
+    paraphrases = load_paraphrases()
     driver = get_driver()
     try:
         async with driver.session() as session:
             if not reembed_only:
                 await ingest_registry(session)
                 await ingest_pairs(session, pairs)
+                await ingest_paraphrases(session, paraphrases)
+            cleared = await clear_paraphrase_embeddings(session)
             embedded = await embed_questions(session, force=reembed_only)
             totals = await counts(session)
     finally:
@@ -354,6 +462,10 @@ async def run(*, reembed_only: bool) -> int:
             {
                 "mode": "reembed" if reembed_only else "ingest",
                 "pairs": len(pairs),
+                "paraphrases": len(paraphrases),
+                # Amendment P. Nonzero exactly once, on the first ingest after
+                # the amendment lands against a graph that predates it.
+                "paraphrase_embeddings_cleared": cleared,
                 "questions_embedded": embedded,
                 "nodes": totals["nodes"],
                 "relationships": totals["relationships"],

@@ -22,9 +22,13 @@ model_list:
       model: ollama/llama3.2:3b
       api_base: os.environ/OLLAMA_BASE_URL
 
+  # Pinned to the 8B tier: reranking is the one local step whose judgement
+  # quality directly moves a retrieval metric, so it gets the larger model even
+  # though this host is CPU-only. `config/scoring.yaml` holds the same tag and
+  # `make preflight` asserts they agree with what is installed.
   - model_name: rerank-model
     litellm_params:
-      model: ollama/llama3.2:3b
+      model: ollama/llama3.1:8b
       api_base: os.environ/OLLAMA_BASE_URL
       temperature: 0
 
@@ -37,7 +41,7 @@ model_list:
   # model means reindexing — hence `make reembed` exists from day one.
   - model_name: embed-model
     litellm_params:
-      model: ollama/nomic-embed-text
+      model: ollama/nomic-embed-text:v1.5
       api_base: os.environ/OLLAMA_BASE_URL
 
   # ---- Groq: the two quality-critical steps ------------------------------

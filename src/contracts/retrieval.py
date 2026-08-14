@@ -42,7 +42,18 @@ class ScoredCandidate(BaseModel):
     question_id: str = Field(min_length=1)
     answer_node_id: str = Field(min_length=1)
     tier1_summary: str
+    #: Raw cosine, kept for the audit trail. Not comparable across models.
     vector_score: float = Field(ge=0.0, le=1.0)
+    #: Raw cosine mapped onto measured corpus anchors (D17). 0 = indistinguishable
+    #: from an unrelated question, 1 = as close as a genuine paraphrase.
+    calibrated_similarity: float = Field(default=0.0, ge=0.0, le=1.0)
+    #: "Is this the right answer?" — calibrated similarity blended with rerank.
+    #: The NO_MATCH decision uses THIS and nothing else.
+    relevance: float = Field(default=0.0, ge=0.0, le=1.0)
+    #: "Among relevant candidates, which should win?" — outcome x evidence x
+    #: recency nudge, clamped so it can only reorder comparable candidates.
+    preference: float = Field(default=1.0, gt=0.0)
+    #: Retained name for `preference`; the report and older readers use it.
     graph_multiplier: float = Field(gt=0.0)
     rerank_score: float | None = Field(default=None, ge=0.0, le=1.0)
     final_score: float = Field(ge=0.0, le=1.0)
@@ -76,18 +87,27 @@ class RetrievalResult(BaseModel):
         return self
 
     @model_validator(mode="after")
-    def _status_matches_scores(self) -> RetrievalResult:
-        """`status` must be derivable from the scores, not asserted alongside them.
+    def _status_is_decided_by_relevance_alone(self) -> RetrievalResult:
+        """`status` must be derivable from RELEVANCE, not asserted alongside it.
 
-        Without this, a NO_MATCH could ship with a perfectly good candidate
-        attached (or the reverse), and the drafter's escalate-or-answer decision
-        would rest on a field nothing checks.
+        D17: the floor is judged on relevance, never on final_score. Preference
+        may reorder qualifying candidates; it must never rescue a below-floor
+        one or doom an above-floor one. Encoding it here rather than leaving it
+        to the scorer means a future caller cannot reintroduce the coupling that
+        let an 8x preference span overturn a 1.5x similarity difference.
+
+        Without this a NO_MATCH could also ship with a perfectly good candidate
+        attached, and the drafter's escalate-or-answer decision would rest on a
+        field nothing verifies.
         """
-        cleared = [c for c in self.candidates if c.final_score >= self.floor_used]
+        cleared = [c for c in self.candidates if c.relevance >= self.floor_used]
         if self.status is RetrievalStatus.NO_MATCH and cleared:
             raise ValueError(
-                f"status=NO_MATCH but {len(cleared)} candidate(s) reach floor {self.floor_used}"
+                f"status=NO_MATCH but {len(cleared)} candidate(s) reach the relevance "
+                f"floor {self.floor_used}"
             )
         if self.status is RetrievalStatus.MATCHED and not cleared:
-            raise ValueError(f"status=MATCHED but no candidate reaches floor {self.floor_used}")
+            raise ValueError(
+                f"status=MATCHED but no candidate reaches the relevance floor {self.floor_used}"
+            )
         return self

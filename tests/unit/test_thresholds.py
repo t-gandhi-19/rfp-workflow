@@ -36,7 +36,10 @@ class TestShippedConfig:
         config = thresholds.scoring_config()
         assert config.retrieval.top_k == 20
         assert config.retrieval.rerank_top_n == 8
-        assert config.retrieval.match_floor == pytest.approx(0.55)
+        # Amendment O: config holds no floor VALUE at all — only the rule that
+        # derives one. The value lives in the calibration artifact.
+        assert config.calibration.floor_derivation.midpoint_weight == pytest.approx(0.5)
+        assert config.calibration.floor_derivation.background_anchor == "bg_p99"
         assert config.final_score.weights.vector_graph == pytest.approx(0.5)
         assert config.final_score.weights.rerank == pytest.approx(0.5)
         assert config.graph_multiplier.outcome.won == pytest.approx(1.15)
