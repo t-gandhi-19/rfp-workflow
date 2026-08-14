@@ -10,7 +10,7 @@ COMPOSE      := docker compose
 INFRA        := --profile infra
 APP          := --profile app
 UV           := uv
-RUN          := $(UV) run
+UVRUN        := $(UV) run
 GIT_SHA      := $(shell git rev-parse --short HEAD 2>/dev/null || echo local-dev)
 
 .PHONY: help
@@ -93,11 +93,11 @@ HOST_SERVICES = KEYCLOAK_BASE=$${KEYCLOAK_BASE:-http://localhost:$${KEYCLOAK_POR
 
 .PHONY: migrate
 migrate: check-env ## Apply Alembic migrations (idempotent)
-	set -a && source .env && set +a && $(HOST_PG) $(RUN) alembic upgrade head
+	set -a && source .env && set +a && $(HOST_PG) $(UVRUN) alembic upgrade head
 
 .PHONY: migrate-status
 migrate-status: check-env ## Show the current migration revision
-	set -a && source .env && set +a && $(HOST_PG) $(RUN) alembic current
+	set -a && source .env && set +a && $(HOST_PG) $(UVRUN) alembic current
 
 # ---------------------------------------------------------------------------
 # Development
@@ -108,7 +108,7 @@ install: ## Sync the virtualenv from uv.lock
 
 .PHONY: test
 test: ## Run unit and security tests
-	$(RUN) pytest tests/unit tests/security -q
+	$(UVRUN) pytest tests/unit tests/security -q
 
 .PHONY: test-integration
 test-integration: check-env ## Run integration tests (requires 'make up')
@@ -124,7 +124,7 @@ test-integration: check-env ## Run integration tests (requires 'make up')
 	@# hand what the recipe must supply" that hid the original fault.
 	@set -a && source .env && set +a && \
 		$(HOST_NEO4J) $(HOST_PG) $(HOST_SERVICES) \
-		$(RUN) pytest tests/integration -q -m integration
+		$(UVRUN) pytest tests/integration -q -m integration
 
 .PHONY: test-all
 test-all: test test-integration ## Run every test
@@ -162,7 +162,7 @@ test-report: ## Per-suite verbatim pytest summaries + the SHA they were produced
 	for suite in unit security integration; do \
 		printf '\n### tests/%s\n' "$$suite"; \
 		$(HOST_NEO4J) $(HOST_PG) $(HOST_SERVICES) \
-			$(RUN) pytest tests/$$suite -q 2>&1 | tail -1; \
+			$(UVRUN) pytest tests/$$suite -q 2>&1 | tail -1; \
 	done
 
 .PHONY: tag-phase
@@ -171,14 +171,14 @@ tag-phase: ## Tag a phase — make tag-phase TAG=v0.3 (refuses unless main is cl
 
 .PHONY: lint
 lint: ## ruff check + format check + mypy
-	$(RUN) ruff check .
-	$(RUN) ruff format --check .
-	$(RUN) mypy src tests
+	$(UVRUN) ruff check .
+	$(UVRUN) ruff format --check .
+	$(UVRUN) mypy src tests
 
 .PHONY: fmt
 fmt: ## Autoformat and autofix
-	$(RUN) ruff check --fix .
-	$(RUN) ruff format .
+	$(UVRUN) ruff check --fix .
+	$(UVRUN) ruff format .
 
 # ---------------------------------------------------------------------------
 # Pipeline — arriving in later phases
@@ -199,34 +199,34 @@ preflight: check-env ## Verify the embedding path and that calibration is curren
 	@# network. Amendment Q's auth probe runs from the host, so without this it
 	@# dials a name that does not exist — on any machine, including a clean clone.
 	@set -a && source .env && set +a && \
-		$(HOST_NEO4J) $(PREFLIGHT_ENV) $(RUN) python -m scripts.preflight
+		$(HOST_NEO4J) $(PREFLIGHT_ENV) $(UVRUN) python -m scripts.preflight
 
 .PHONY: preflight-pre-ingest
 preflight-pre-ingest: check-env ## Preflight without the calibration check (nothing to calibrate yet)
 	@# `ingest` depends on this target, so a missing HOST_NEO4J here stopped
 	@# `make ingest` at the gate before it reached any of its own work.
 	@set -a && source .env && set +a && \
-		$(HOST_NEO4J) $(PREFLIGHT_ENV) $(RUN) python -m scripts.preflight --skip-calibration
+		$(HOST_NEO4J) $(PREFLIGHT_ENV) $(UVRUN) python -m scripts.preflight --skip-calibration
 
 .PHONY: apply-schema
 apply-schema: check-env ## Apply the Neo4j schema (idempotent)
-	@set -a && source .env && set +a && $(HOST_NEO4J) $(RUN) python -m scripts.apply_schema
+	@set -a && source .env && set +a && $(HOST_NEO4J) $(UVRUN) python -m scripts.apply_schema
 
 .PHONY: fixtures
 fixtures: ## Regenerate the synthetic fixtures
-	$(RUN) python -m scripts.generate_fixtures
+	$(UVRUN) python -m scripts.generate_fixtures
 
 .PHONY: fixtures-check
 fixtures-check: ## Verify committed fixtures match a fresh generation
-	$(RUN) python -m scripts.generate_fixtures --check
+	$(UVRUN) python -m scripts.generate_fixtures --check
 
 .PHONY: validate-manual-key
 validate-manual-key: ## Validate the hand-written answer key (structure + cross-refs)
-	$(RUN) python -m scripts.validate_manual_key
+	$(UVRUN) python -m scripts.validate_manual_key
 
 .PHONY: manual-key-schema
 manual-key-schema: ## Regenerate the manual answer key's JSON Schema from the model
-	$(RUN) python -m scripts.validate_manual_key --emit-schema
+	$(UVRUN) python -m scripts.validate_manual_key --emit-schema
 
 .PHONY: calibrate
 calibrate: check-env ## Measure the retrieval calibration anchors and derive the match floor
@@ -236,12 +236,12 @@ calibrate: check-env ## Measure the retrieval calibration anchors and derive the
 	@# against the vector index before writing an artifact, so it dials the graph.
 	@set -a && source .env && set +a && \
 		$(HOST_NEO4J) $(PREFLIGHT_ENV) WRITE_API_PORT=$${WRITE_API_PORT:-8001} \
-		$(RUN) python -m scripts.calibrate
+		$(UVRUN) python -m scripts.calibrate
 
 .PHONY: calibrate-dry
 calibrate-dry: check-env ## Measure and print the anchors without writing anything
 	@set -a && source .env && set +a && \
-		$(HOST_NEO4J) $(PREFLIGHT_ENV) $(RUN) python -m scripts.calibrate --dry-run
+		$(HOST_NEO4J) $(PREFLIGHT_ENV) $(UVRUN) python -m scripts.calibrate --dry-run
 
 .PHONY: calibrate-commission
 calibrate-commission: check-env ## SET the separation guard baselines from a real measurement (D18)
@@ -252,19 +252,19 @@ calibrate-commission: check-env ## SET the separation guard baselines from a rea
 	@# against the vector index before writing an artifact, so it dials the graph.
 	@set -a && source .env && set +a && \
 		$(HOST_NEO4J) $(PREFLIGHT_ENV) WRITE_API_PORT=$${WRITE_API_PORT:-8001} \
-		$(RUN) python -m scripts.calibrate --commission
+		$(UVRUN) python -m scripts.calibrate --commission
 
 .PHONY: ingest
 ingest: preflight-pre-ingest apply-schema ## Load fixtures into the graph, then calibrate
 	@# Calibration runs LAST and is part of ingest rather than a step someone
 	@# remembers: the anchors are a property of the corpus, so a corpus that has
 	@# just changed has a calibration that no longer describes it.
-	@set -a && source .env && set +a && $(HOST_NEO4J) $(RUN) python -m scripts.ingest
+	@set -a && source .env && set +a && $(HOST_NEO4J) $(UVRUN) python -m scripts.ingest
 	@$(MAKE) --no-print-directory calibrate
 
 .PHONY: reembed
 reembed: preflight-pre-ingest ## Recompute every embedding, then recalibrate
-	@set -a && source .env && set +a && $(HOST_NEO4J) $(RUN) python -m scripts.ingest --reembed
+	@set -a && source .env && set +a && $(HOST_NEO4J) $(UVRUN) python -m scripts.ingest --reembed
 	@$(MAKE) --no-print-directory calibrate
 
 # The harness dials Neo4j (retrieval), the gateway (embeddings), Keycloak and
@@ -277,7 +277,7 @@ evals: check-env ## Run the eval harness with the config-default rerank setting 
 		$(HOST_NEO4J) $(HOST_PG) $(PREFLIGHT_ENV) \
 		KEYCLOAK_BASE=$${KEYCLOAK_BASE:-http://localhost:$${KEYCLOAK_PORT_HOST:-8080}} \
 		WRITE_API_BASE=$${WRITE_API_BASE:-http://localhost:$${WRITE_API_PORT:-8001}} \
-		$(RUN) python -m scripts.evals
+		$(UVRUN) python -m scripts.evals
 
 .PHONY: evals-full
 evals-full: check-env ## Run the eval harness with rerank FORCED ON — the official numbers
@@ -285,7 +285,7 @@ evals-full: check-env ## Run the eval harness with rerank FORCED ON — the offi
 		$(HOST_NEO4J) $(HOST_PG) $(PREFLIGHT_ENV) \
 		KEYCLOAK_BASE=$${KEYCLOAK_BASE:-http://localhost:$${KEYCLOAK_PORT_HOST:-8080}} \
 		WRITE_API_BASE=$${WRITE_API_BASE:-http://localhost:$${WRITE_API_PORT:-8001}} \
-		$(RUN) python -m scripts.evals --rerank
+		$(UVRUN) python -m scripts.evals --rerank
 
 .PHONY: evals-ablation
 evals-ablation: check-env ## Run retrieval twice, rerank on and off, and report the deltas
@@ -293,15 +293,24 @@ evals-ablation: check-env ## Run retrieval twice, rerank on and off, and report 
 		$(HOST_NEO4J) $(HOST_PG) $(PREFLIGHT_ENV) \
 		KEYCLOAK_BASE=$${KEYCLOAK_BASE:-http://localhost:$${KEYCLOAK_PORT_HOST:-8080}} \
 		WRITE_API_BASE=$${WRITE_API_BASE:-http://localhost:$${WRITE_API_PORT:-8001}} \
-		$(RUN) python -m scripts.evals --rerank --ablation
+		$(UVRUN) python -m scripts.evals --rerank --ablation
 
 .PHONY: run
-run: ## (Phase 4) Run one RFP end to end — make run FILE=path/to/rfp.pdf
-	$(call phase_gate,run,4,Needs the agent crew and the deterministic controller.)
+run: check-env ## Run one RFP end to end — make run FILE=path/to/rfp.pdf
+	@# HOST_NEO4J, HOST_PG and HOST_SERVICES for the same reason every other
+	@# host-side target carries them: .env holds the CONTAINER view, and this
+	@# dials Neo4j for retrieval, Keycloak and write-api for checkpoints, and
+	@# mcp-server for the drafter's tools.
+	@set -a && source .env && set +a && \
+		$(HOST_NEO4J) $(HOST_PG) $(HOST_SERVICES) $(PREFLIGHT_ENV) \
+		$(UVRUN) python -m scripts.run --file "$(FILE)" $(if $(CUSTOMER),--customer "$(CUSTOMER)",)
 
 .PHONY: resume
-resume: ## (Phase 4) Resume an interrupted run — make resume RUN=<run_id>
-	$(call phase_gate,resume,4,Needs checkpointed run state from a real run.)
+resume: check-env ## Resume an interrupted run — make resume RUN=<run_id> FILE=path/to/rfp.pdf
+	@set -a && source .env && set +a && \
+		$(HOST_NEO4J) $(HOST_PG) $(HOST_SERVICES) $(PREFLIGHT_ENV) \
+		$(UVRUN) python -m scripts.run --resume "$(RUN)" --file "$(FILE)" \
+		$(if $(CUSTOMER),--customer "$(CUSTOMER)",)
 
 .PHONY: demo
 demo: ## (Phase 5) End-to-end on the golden RFP, then open the report

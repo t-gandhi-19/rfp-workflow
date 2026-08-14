@@ -104,6 +104,11 @@ REQUIRED_WIRING: dict[str, set[str]] = {
     "test": set(),
     "test-integration": {HOST_NEO4J, HOST_PG, HOST_SERVICES},
     "test-report": {HOST_NEO4J, HOST_PG, HOST_SERVICES},
+    # Phase 4. A run is the widest-reaching command in the file: Neo4j for
+    # retrieval, the gateway for embeddings and the two Groq steps, Keycloak and
+    # write-api for every checkpoint, and mcp-server for the drafter's tools.
+    "run": {HOST_NEO4J, HOST_PG, HOST_SERVICES, PREFLIGHT_ENV},
+    "resume": {HOST_NEO4J, HOST_PG, HOST_SERVICES, PREFLIGHT_ENV},
 }
 
 #: Targets that dial Neo4j from the host. Named separately from the table above
@@ -132,6 +137,9 @@ DIALS_NEO4J_FROM_HOST = {
     # that could run those tests rather than skip or error them.
     "test-integration",
     "test-report",
+    # Phase 4: a run retrieves for every question.
+    "run",
+    "resume",
 }
 
 
@@ -275,6 +283,30 @@ class TestHostAddressWiring:
             if target in parsed and any(fragment not in parsed[target] for fragment in required)
         }
         assert not missing, f"targets missing required env wiring: {missing}"
+
+
+class TestTheRunIdDoesNotClobberTheRunner:
+    """`make resume RUN=<id>` — the documented interface — must work.
+
+    The Makefile's own "run a command in the venv" variable used to be called
+    `RUN`, and a command-line `RUN=abc` OVERRIDES a file variable in make. So
+    `make resume RUN=abc` would have expanded the recipe's `$(RUN) python` to
+    `abc python`, and the documented invocation was the one thing that could not
+    work. Renamed to `UVRUN`; asserted here so it cannot drift back.
+    """
+
+    def test_the_runner_variable_is_not_named_run(self) -> None:
+        text = read_makefile()
+        assert "\nUVRUN" in text
+        assert not re.search(r"^RUN\s*:?=", text, re.MULTILINE)
+
+    def test_no_recipe_still_expands_a_bare_run_variable(self) -> None:
+        offenders = sorted(name for name, body in recipes().items() if "$(RUN)" in body)
+        # `resume` legitimately passes $(RUN) as the run id to --resume.
+        assert offenders == ["resume"], offenders
+
+    def test_resume_passes_the_run_id_through(self) -> None:
+        assert '--resume "$(RUN)"' in recipes()["resume"]
 
 
 class TestCoverageIsComplete:
