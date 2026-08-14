@@ -599,3 +599,100 @@ def to_category_result(run: RetrievalRun) -> CategoryResult:
             "per-question attribution is rendered below the summary.",
         ],
     )
+
+
+# ---------------------------------------------------------------------------
+# Presentation
+#
+# LIVES HERE, not in a script, because two entry points render the same run:
+# `scripts.eval_retrieval` (the step 5 runner) and `scripts.evals` (the step 8
+# harness). It was written in the first and, when the harness arrived, the
+# harness simply did not print it — so `make evals` reported category verdicts
+# with no attribution behind them, and the numbers a PR quotes came from a
+# different command than the one the Makefile documents.
+#
+# Attribution is part of the result, not a debugging aid: a ranking nobody can
+# account for is a ranking nobody should act on.
+# ---------------------------------------------------------------------------
+
+
+def format_run(run: RetrievalRun) -> str:
+    """The full per-question rendering: metrics, misses, three columns, attribution."""
+    result = to_category_result(run)
+    lines = ["", "retrieval eval", ""]
+    for metric in result.metrics:
+        verdict = "" if metric.passed is None else ("  PASS" if metric.passed else "  FAIL")
+        gate = "" if metric.threshold is None else f"  (threshold {metric.threshold})"
+        lines.append(f"  {metric.label:<52} {metric.value:>8.4f}{gate}{verdict}")
+        if metric.detail:
+            lines.append(f"      {metric.detail}")
+    lines.append("")
+
+    if run.rank1_misses:
+        lines.append("  RANK-1 PRIMARY-SOURCE MISSES (what Recall@5 cannot see):")
+        for miss in run.rank1_misses:
+            lines.append(
+                f"    {miss.number}  expected {miss.expected_answer_id} at rank 1, "
+                f"got {miss.rank1_with_preference} (rank {miss.rank_of_expected} without "
+                f"preference: {miss.rank1_without_preference})"
+            )
+        lines.append("")
+
+    lines.append("  per question:")
+    lines.append(
+        f"    {'no.':<5} {'kind':<13} {'status':<9} {'expected':<10} {'rank':<5} "
+        f"{'cands':<6} pref-decisive"
+    )
+    for outcome in run.outcomes:
+        rank = "-" if outcome.rank_of_expected is None else str(outcome.rank_of_expected)
+        lines.append(
+            f"    {outcome.number:<5} {outcome.kind:<13} {outcome.status.value:<9} "
+            f"{outcome.expected_answer_id or '-':<10} {rank:<5} "
+            f"{len(outcome.candidates):<6} {'YES' if outcome.preference_decisive else 'no'}"
+        )
+    lines.append("")
+
+    # THE THREE COLUMNS: relevance, preference, final — for the rank-1 candidate
+    # of every question. This is where D17's split is legible per question: the
+    # first column is what qualifies a candidate, the second is what reorders
+    # among qualifying ones, and the third is what the drafter actually sees.
+    lines.append("  rank 1 — the drafter's primary source (relevance x preference = final):")
+    lines.append(
+        f"    {'no.':<5} {'answer':<10} {'relevance':>10} {'preference':>11} {'final':>9}"
+    )
+    for outcome in run.outcomes:
+        if not outcome.candidates:
+            lines.append(f"    {outcome.number:<5} {'(none)':<10}")
+            continue
+        top = outcome.candidates[0]
+        lines.append(
+            f"    {outcome.number:<5} {top.answer_id:<10} {top.relevance:>10.4f} "
+            f"{top.preference:>11.4f} {top.final:>9.4f}"
+        )
+    lines.append("")
+
+    lines.append("  attribution — top 3 per question (raw -> calibrated -> pref -> final):")
+    for outcome in run.outcomes:
+        lines.append(f"    {outcome.number}  floor {outcome.floor_used:.4f}")
+        if not outcome.candidates:
+            lines.append("      (no candidates)")
+        for attribution in outcome.candidates[:3]:
+            flag = "clears" if attribution.cleared_floor else "BELOW "
+            lines.append(
+                f"      {attribution.rank}. {attribution.answer_id:<10} "
+                f"raw {attribution.raw_cosine:.4f}  cal {attribution.calibrated:.4f}  "
+                f"rel {attribution.relevance:.4f}  pref {attribution.preference:.4f}  "
+                f"final {attribution.final:.4f}  {flag}"
+            )
+    lines.append("")
+
+    if result.violations:
+        lines.append("  VIOLATIONS:")
+        for violation in result.violations:
+            where = f" [{violation.question_number}]" if violation.question_number else ""
+            lines.append(f"    {violation.rule}{where}: {violation.detail}")
+        lines.append("")
+    else:
+        lines.append("  no zero-tolerance violations.")
+        lines.append("")
+    return "\n".join(lines)

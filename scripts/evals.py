@@ -18,9 +18,11 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import sys
 import uuid
 from pathlib import Path
+from typing import Any
 
 from src.contracts.embedding import embedding_config
 from src.contracts.thresholds import ScoringConfig, scoring_config
@@ -35,7 +37,7 @@ from src.evals.registry import (
     in_report_order,
 )
 from src.evals.report import DEFAULT_OUT, ReportContext, write
-from src.evals.retrieval import run_retrieval_eval
+from src.evals.retrieval import RetrievalRun, format_run, run_retrieval_eval
 from src.evals.retrieval import to_category_result as retrieval_result
 from src.evals.store import (
     Delta,
@@ -59,7 +61,7 @@ def rerank_disabled(config: ScoringConfig) -> ScoringConfig:
     return ScoringConfig.model_validate(data)
 
 
-async def _retrieval(config: ScoringConfig) -> CategoryResult:
+async def _retrieval(config: ScoringConfig) -> RetrievalRun:
     artifact = load_for_current_corpus()
     driver = get_driver()
     try:
@@ -72,7 +74,35 @@ async def _retrieval(config: ScoringConfig) -> CategoryResult:
             )
     finally:
         await close_driver()
-    return retrieval_result(run)
+    return run
+
+
+def _retrieval_json(run: RetrievalRun, *, config: ScoringConfig) -> dict[str, Any]:
+    """The machine-readable form, identical in shape to the step 5 runner's.
+
+    Same keys deliberately: anything already reading `out/retrieval-*.json` must
+    not have to learn a second schema because the harness became the caller.
+    """
+    return {
+        "rerank_enabled": config.rerank.enabled,
+        "recall_at_5": run.recall_at_5,
+        "rank1_accuracy": run.rank1_accuracy,
+        "mrr": run.mrr,
+        "preference_decisive_rate": run.preference_decisive_rate,
+        "no_match": sorted(run.no_match_numbers),
+        "category": retrieval_result(run).model_dump(mode="json"),
+        "outcomes": [outcome.model_dump(mode="json") for outcome in run.outcomes],
+    }
+
+
+def _write_json(path: Path, payload: dict[str, Any]) -> None:
+    """Machine-readable per-question output, beside the HTML report.
+
+    ASYNC240 objects to blocking pathlib inside async code; this is a one-shot
+    CLI writing its own artifacts, and there is no concurrent work to starve.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8", newline="\n")
 
 
 def _console(results: list[CategoryResult], movements: list[Delta]) -> str:
@@ -181,13 +211,26 @@ async def run(
         results.append(extraction_result(run_extraction_eval()))
 
     if Category.RETRIEVAL in categories:
-        retrieval_on = await _retrieval(config)
-        results.append(retrieval_on)
+        run_on = await _retrieval(config)
+        results.append(retrieval_result(run_on))
+
+        # The full per-question rendering, from the same function the step 5
+        # runner uses. The harness used to print category verdicts with no
+        # attribution behind them, so the numbers a PR quotes came from a
+        # different command than the one the Makefile documents.
+        sys.stdout.write(format_run(run_on))
+        _write_json(
+            out_path.parent / "retrieval-rerank-on.json", _retrieval_json(run_on, config=config)
+        )
 
         if ablation:
             other = rerank_disabled(config) if config.rerank.enabled else config
-            retrieval_off = await _retrieval(other)
-            sys.stdout.write(_ablation_table(retrieval_on, retrieval_off))
+            run_off = await _retrieval(other)
+            sys.stdout.write(_ablation_table(retrieval_result(run_on), retrieval_result(run_off)))
+            _write_json(
+                out_path.parent / "retrieval-rerank-off.json",
+                _retrieval_json(run_off, config=other),
+            )
 
     # A category the caller excluded is reported as a placeholder rather than
     # dropped, and the reason says it was DESELECTED rather than unbuilt. The

@@ -19,7 +19,7 @@ from pathlib import Path
 from src.contracts.thresholds import ScoringConfig, scoring_config
 from src.evals.retrieval import (
     RECALL_AT_5_THRESHOLD,
-    RetrievalRun,
+    format_run,
     run_retrieval_eval,
     to_category_result,
 )
@@ -34,68 +34,6 @@ def rerank_disabled(config: ScoringConfig) -> ScoringConfig:
     data = config.model_dump()
     data["rerank"]["enabled"] = False
     return ScoringConfig.model_validate(data)
-
-
-def summary(run: RetrievalRun) -> str:
-    result = to_category_result(run)
-    lines = ["", "retrieval eval", ""]
-    for metric in result.metrics:
-        verdict = "" if metric.passed is None else ("  PASS" if metric.passed else "  FAIL")
-        gate = "" if metric.threshold is None else f"  (threshold {metric.threshold})"
-        lines.append(f"  {metric.label:<52} {metric.value:>8.4f}{gate}{verdict}")
-        if metric.detail:
-            lines.append(f"      {metric.detail}")
-    lines.append("")
-
-    if run.rank1_misses:
-        lines.append("  RANK-1 PRIMARY-SOURCE MISSES (what Recall@5 cannot see):")
-        for miss in run.rank1_misses:
-            lines.append(
-                f"    {miss.number}  expected {miss.expected_answer_id} at rank 1, "
-                f"got {miss.rank1_with_preference} (rank {miss.rank_of_expected} without "
-                f"preference: {miss.rank1_without_preference})"
-            )
-        lines.append("")
-
-    lines.append("  per question:")
-    lines.append(
-        f"    {'no.':<5} {'kind':<13} {'status':<9} {'expected':<10} {'rank':<5} "
-        f"{'cands':<6} pref-decisive"
-    )
-    for outcome in run.outcomes:
-        rank = "-" if outcome.rank_of_expected is None else str(outcome.rank_of_expected)
-        lines.append(
-            f"    {outcome.number:<5} {outcome.kind:<13} {outcome.status.value:<9} "
-            f"{outcome.expected_answer_id or '-':<10} {rank:<5} "
-            f"{len(outcome.candidates):<6} {'YES' if outcome.preference_decisive else 'no'}"
-        )
-    lines.append("")
-
-    lines.append("  attribution — top 3 per question (raw -> calibrated -> pref -> final):")
-    for outcome in run.outcomes:
-        lines.append(f"    {outcome.number}  floor {outcome.floor_used:.4f}")
-        if not outcome.candidates:
-            lines.append("      (no candidates)")
-        for attribution in outcome.candidates[:3]:
-            flag = "clears" if attribution.cleared_floor else "BELOW "
-            lines.append(
-                f"      {attribution.rank}. {attribution.answer_id:<10} "
-                f"raw {attribution.raw_cosine:.4f}  cal {attribution.calibrated:.4f}  "
-                f"rel {attribution.relevance:.4f}  pref {attribution.preference:.4f}  "
-                f"final {attribution.final:.4f}  {flag}"
-            )
-    lines.append("")
-
-    if result.violations:
-        lines.append("  VIOLATIONS:")
-        for violation in result.violations:
-            where = f" [{violation.question_number}]" if violation.question_number else ""
-            lines.append(f"    {violation.rule}{where}: {violation.detail}")
-        lines.append("")
-    else:
-        lines.append("  no zero-tolerance violations.")
-        lines.append("")
-    return "\n".join(lines)
 
 
 async def run(*, use_rerank: bool | None, json_path: Path | None) -> int:
@@ -123,7 +61,7 @@ async def run(*, use_rerank: bool | None, json_path: Path | None) -> int:
     finally:
         await close_driver()
 
-    sys.stdout.write(summary(run_result))
+    sys.stdout.write(format_run(run_result))
     category = to_category_result(run_result)
 
     if json_path is not None:
