@@ -341,6 +341,16 @@ services:
       KEYCLOAK_REALM: ${KEYCLOAK_REALM:-rfp}
       KEYCLOAK_ISSUER: ${KEYCLOAK_ISSUER:-http://keycloak:8080/realms/rfp}
       KEYCLOAK_AUDIENCE: ${KEYCLOAK_AUDIENCE:-rfp-api}
+      # Phase 4. `save_draft` writes THROUGH write-api (rule 4), so the server
+      # needs the container view of it — the default is localhost, which inside
+      # a container is the container itself.
+      WRITE_API_BASE: ${MCP_WRITE_API_BASE:-http://write-api:8001}
+      # `get_run_state` reads Postgres with the SELECT-only identity. Same
+      # container view: `postgres`, not the host port .env publishes.
+      POSTGRES_HOST: ${POSTGRES_HOST:-postgres}
+      POSTGRES_PORT: ${POSTGRES_PORT:-5432}
+      POSTGRES_DB: ${POSTGRES_DB:-rfp}
+      APP_READER_PASSWORD: ${APP_READER_PASSWORD}
       GIT_SHA: ${GIT_SHA:-local-dev}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
     ports:
@@ -349,6 +359,8 @@ services:
       neo4j:
         condition: service_healthy
       keycloak:
+        condition: service_healthy
+      write-api:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8002/health').status==200 else 1)"]

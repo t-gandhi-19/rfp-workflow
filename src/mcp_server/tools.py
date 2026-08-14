@@ -29,17 +29,30 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
 
-from neo4j import AsyncSession
 from pydantic import BaseModel, ConfigDict, Field
 
-from src.contracts import EntityCheckResult
+from src.contracts import DraftedAnswer, EntityCheckResult, RunState
 from src.contracts.embedding import embedding_config
 from src.contracts.enums import EntityType
 from src.graph import queries
+from src.mcp_server.context import ToolContext
 
-#: The realm role every tool requires. Read-only access to the graph is a single
-#: grant: there is no tool here that writes, so there is nothing to subdivide.
+#: Read-only access to the graph. The six original tools all require exactly
+#: this, because none of them writes and there was nothing to subdivide.
 KG_READER = "kg-reader"
+
+#: Phase 4. `save_draft` writes, and writing is not reading — a caller that may
+#: retrieve is not thereby a caller that may persist an answer. Same role name
+#: and same semantics as the write-api's, because it IS the write-api's: the
+#: tool proxies there with the caller's own token rather than writing Postgres
+#: itself (rule 4).
+DRAFT_WRITER = "draft-writer"
+
+#: Phase 4. `get_run_state` reads a run's progress. A third role rather than
+#: reusing `kg-reader`, because the graph and the run record are different
+#: worlds: a component entitled to read the corpus is not thereby entitled to
+#: read what any given customer's live run is doing.
+RFP_READER = "rfp-reader"
 
 
 # ---------------------------------------------------------------------------
@@ -143,13 +156,47 @@ class CoverageGapsOutput(BaseModel):
     gaps: list[queries.CoverageGap]
 
 
+class SaveDraftInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    run_id: str = Field(min_length=1, description="The run this answer belongs to.")
+    #: The whole contract, not a loose set of fields. `DraftedAnswer` refuses an
+    #: uncited, unescalated answer, so nothing ungrounded can reach the table
+    #: through this tool — the validation happens before a connection is opened.
+    answer: DraftedAnswer
+
+
+class SaveDraftOutput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    written: str
+    key: str
+    #: The JWT subject write-api recorded. Returned so a caller can see whose
+    #: identity was actually stamped on the row rather than assuming its own.
+    written_by: str
+
+
+class GetRunStateInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    run_id: str = Field(min_length=1)
+
+
+class RunStateOutput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    #: None for a run id that does not exist — a legitimate answer rather than
+    #: an error, so an agent is not told to retry something that cannot succeed.
+    state: RunState | None
+
+
 # ---------------------------------------------------------------------------
 # Handlers
 # ---------------------------------------------------------------------------
 
 
 async def _retrieve_candidates(
-    session: AsyncSession, payload: RetrieveCandidatesInput
+    ctx: ToolContext, payload: RetrieveCandidatesInput
 ) -> CandidatesOutput:
     expected = embedding_config().model.dimensions
     if len(payload.embedding) != expected:
@@ -157,7 +204,7 @@ async def _retrieve_candidates(
             f"embedding has {len(payload.embedding)} dimensions, the index expects {expected}"
         )
     hits = await queries.find_similar_questions(
-        session,
+        ctx.require_session(),
         embedding=payload.embedding,
         domain=payload.domain,
         requesting_customer=payload.requesting_customer,
@@ -166,36 +213,74 @@ async def _retrieve_candidates(
     return CandidatesOutput(candidates=hits)
 
 
-async def _get_full_answers(session: AsyncSession, payload: GetFullAnswersInput) -> AnswersOutput:
+async def _get_full_answers(ctx: ToolContext, payload: GetFullAnswersInput) -> AnswersOutput:
     answers = await queries.answers_for_question(
-        session,
+        ctx.require_session(),
         question_id=payload.question_id,
         requesting_customer=payload.requesting_customer,
     )
     return AnswersOutput(answers=answers)
 
 
-async def _get_evidence(session: AsyncSession, payload: GetEvidenceInput) -> EvidenceOutput:
-    lineage = await queries.get_answer_with_lineage(session, answer_id=payload.answer_id)
+async def _get_evidence(ctx: ToolContext, payload: GetEvidenceInput) -> EvidenceOutput:
+    lineage = await queries.get_answer_with_lineage(
+        ctx.require_session(), answer_id=payload.answer_id
+    )
     return EvidenceOutput(lineage=lineage)
 
 
-async def _entity_exists(session: AsyncSession, payload: EntityExistsInput) -> EntityExistsOutput:
+async def _entity_exists(ctx: ToolContext, payload: EntityExistsInput) -> EntityExistsOutput:
     resolution = await queries.entity_exists(
-        session, name_or_code=payload.name, entity_type=payload.entity_type
+        ctx.require_session(), name_or_code=payload.name, entity_type=payload.entity_type
     )
     return EntityExistsOutput(resolution=resolution)
 
 
 async def _get_sme_for_capability(
-    session: AsyncSession, payload: GetSmeForCapabilityInput
+    ctx: ToolContext, payload: GetSmeForCapabilityInput
 ) -> SmesOutput:
-    smes = await queries.get_sme_for_capability(session, capability_id=payload.capability_id)
+    smes = await queries.get_sme_for_capability(
+        ctx.require_session(), capability_id=payload.capability_id
+    )
     return SmesOutput(smes=smes)
 
 
-async def _coverage_gaps(session: AsyncSession, payload: CoverageGapsInput) -> CoverageGapsOutput:
-    gaps = await queries.coverage_gaps(session, rfp_id=payload.rfp_id)
+async def _save_draft(ctx: ToolContext, payload: SaveDraftInput) -> SaveDraftOutput:
+    """Persist one drafted answer — THROUGH write-api, never to Postgres here.
+
+    Rule 4 has no exception for "the service is on our side of the network".
+    The row's `written_by` therefore records the ORIGINAL caller, because this
+    forwards their token rather than minting one of its own: an audit trail that
+    said every draft was written by mcp-server would be an audit trail that
+    answered no question anybody asks of it.
+    """
+    from src.mcp_server.write_client import put_draft
+
+    ack = await put_draft(run_id=payload.run_id, answer=payload.answer, token=ctx.require_token())
+    return SaveDraftOutput(written=ack["written"], key=ack["key"], written_by=ack["written_by"])
+
+
+async def _get_run_state(ctx: ToolContext, payload: GetRunStateInput) -> RunStateOutput:
+    """Read one run's checkpointed progress.
+
+    Reads go directly through the SELECT-only identity, the same asymmetry as
+    `src/evals/store.py` and `src/controller/checkpoint.py` — and for the same
+    reason: adding a read endpoint to write-api would put a query surface on the
+    only thing allowed to mutate state.
+    """
+    from src.controller.checkpoint import CheckpointError, load_run
+
+    try:
+        resumed = await load_run(payload.run_id)
+    except CheckpointError:
+        # Distinct from an error: "no such run" is a legitimate answer, and a
+        # 500 would tell an agent to retry something that will never succeed.
+        return RunStateOutput(state=None)
+    return RunStateOutput(state=resumed.state)
+
+
+async def _coverage_gaps(ctx: ToolContext, payload: CoverageGapsInput) -> CoverageGapsOutput:
+    gaps = await queries.coverage_gaps(ctx.require_session(), rfp_id=payload.rfp_id)
     return CoverageGapsOutput(gaps=gaps)
 
 
@@ -212,7 +297,18 @@ class ToolSpec:
     description: str
     input_model: type[BaseModel]
     output_model: type[BaseModel]
-    handler: Callable[[AsyncSession, Any], Awaitable[BaseModel]]
+    handler: Callable[[ToolContext, Any], Awaitable[BaseModel]]
+    #: The realm role this tool requires. Defaults to `kg-reader` because six of
+    #: the eight are graph reads — but it is a FIELD, so a write tool cannot be
+    #: added without stating what it needs, and `tests/unit/test_mcp_tools.py`
+    #: asserts that the two non-read tools do not sit behind the read role.
+    required_role: str = KG_READER
+    #: Whether the invocation opens a graph session.
+    needs_graph: bool = True
+    #: Whether the caller's own bearer token is forwarded to the handler. True
+    #: only for tools that write through write-api, so a read tool never holds
+    #: a credential it has no use for.
+    needs_token: bool = False
 
     def schema(self) -> dict[str, Any]:
         """The manifest entry. JSON Schema derived from the contracts, never
@@ -274,6 +370,33 @@ TOOLS: tuple[ToolSpec, ...] = (
         input_model=CoverageGapsInput,
         output_model=CoverageGapsOutput,
         handler=_coverage_gaps,
+    ),
+    # Phase 4. The first two tools that are not graph reads, and the reason
+    # `required_role` is a field rather than a constant.
+    ToolSpec(
+        name="save_draft",
+        description=(
+            "Persist one drafted answer for a run. Writes through write-api with the "
+            "CALLER's token, so the row records who asked. Requires 'draft-writer'."
+        ),
+        input_model=SaveDraftInput,
+        output_model=SaveDraftOutput,
+        handler=_save_draft,
+        required_role=DRAFT_WRITER,
+        needs_graph=False,
+        needs_token=True,
+    ),
+    ToolSpec(
+        name="get_run_state",
+        description=(
+            "One run's checkpointed stage, per-question statuses and spend. "
+            "Returns null for an unknown run id. Requires 'rfp-reader'."
+        ),
+        input_model=GetRunStateInput,
+        output_model=RunStateOutput,
+        handler=_get_run_state,
+        required_role=RFP_READER,
+        needs_graph=False,
     ),
 )
 

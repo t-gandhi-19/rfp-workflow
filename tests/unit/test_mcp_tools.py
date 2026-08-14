@@ -17,7 +17,9 @@ from pydantic import ValidationError
 from src.contracts.enums import EntityType
 from src.graph import queries
 from src.mcp_server.tools import (
+    DRAFT_WRITER,
     KG_READER,
+    RFP_READER,
     TOOLS,
     TOOLS_BY_NAME,
     EntityExistsInput,
@@ -32,6 +34,23 @@ EXPECTED_TOOLS = {
     "entity_exists",
     "get_sme_for_capability",
     "coverage_gaps",
+    # Phase 4. Neither is a graph read, which is why `required_role` became a
+    # field on ToolSpec rather than staying a module constant.
+    "save_draft",
+    "get_run_state",
+}
+
+#: The six that wrap `src.graph.queries`. Kept separate from the set above
+#: because the "delegates to a tested query function" rule is about THEM: the
+#: two Phase 4 tools delegate to write-api and to the checkpoint reader, and
+#: asserting they call `queries.` would be asserting the wrong thing.
+GRAPH_TOOLS = {
+    "retrieve_candidates",
+    "get_full_answers",
+    "get_evidence",
+    "entity_exists",
+    "get_sme_for_capability",
+    "coverage_gaps",
 }
 
 #: Substrings that would betray a query-language escape hatch in a field name.
@@ -39,19 +58,54 @@ _QUERY_SMELLS = ("cypher", "query_string", "raw", "statement", "sql", "script", 
 
 
 class TestTheToolSet:
-    def test_exactly_the_six_specified_tools_exist(self) -> None:
+    def test_exactly_the_specified_tools_exist(self) -> None:
         assert set(TOOLS_BY_NAME) == EXPECTED_TOOLS
 
     def test_names_are_unique(self) -> None:
-        assert len(TOOLS) == len(TOOLS_BY_NAME) == 6
+        assert len(TOOLS) == len(TOOLS_BY_NAME) == len(EXPECTED_TOOLS)
 
     def test_every_tool_describes_itself(self) -> None:
         """The description is what an agent chooses on."""
         for tool in TOOLS:
             assert len(tool.description) > 40, tool.name
 
-    def test_one_role_covers_them_all(self) -> None:
-        assert KG_READER == "kg-reader"
+
+class TestRolesAreNotOneGrant:
+    """A retrieval grant is not a write grant.
+
+    Every tool sat behind `kg-reader` until Phase 4, and adding a WRITE tool to
+    that route would have made every existing retriever able to persist an
+    answer — without any test failing, because the route-level dependency was
+    the only thing that named a role.
+    """
+
+    def test_the_graph_reads_need_kg_reader(self) -> None:
+        for name in GRAPH_TOOLS:
+            assert TOOLS_BY_NAME[name].required_role == KG_READER, name
+
+    def test_saving_a_draft_needs_the_write_role(self) -> None:
+        assert TOOLS_BY_NAME["save_draft"].required_role == DRAFT_WRITER
+
+    def test_reading_a_run_needs_the_run_reader_role(self) -> None:
+        """The graph and the run record are different worlds: reading the corpus
+        does not entitle a caller to watch a customer's live run."""
+        assert TOOLS_BY_NAME["get_run_state"].required_role == RFP_READER
+
+    def test_no_write_tool_hides_behind_the_read_role(self) -> None:
+        for tool in TOOLS:
+            if not tool.needs_graph and tool.name != "get_run_state":
+                assert tool.required_role != KG_READER, tool.name
+
+    def test_only_the_write_tool_is_handed_a_token(self) -> None:
+        """A read tool holding a forwarded credential is a credential with no
+        use and one more place to leak it from."""
+        assert [tool.name for tool in TOOLS if tool.needs_token] == ["save_draft"]
+
+    def test_the_non_graph_tools_get_no_session(self) -> None:
+        assert {tool.name for tool in TOOLS if not tool.needs_graph} == {
+            "save_draft",
+            "get_run_state",
+        }
 
 
 class TestNoRawQueryToolExists:
@@ -87,7 +141,7 @@ class TestNoRawQueryToolExists:
         """The handler bodies name functions from `src.graph.queries` and run no
         Cypher of their own."""
         exported = {name for name in dir(queries) if not name.startswith("_")}
-        for tool in TOOLS:
+        for tool in (TOOLS_BY_NAME[name] for name in sorted(GRAPH_TOOLS)):
             source = inspect.getsource(tool.handler)
             assert "queries." in source, tool.name
             called = {name for name in exported if f"queries.{name}(" in source}
@@ -96,6 +150,27 @@ class TestNoRawQueryToolExists:
             lowered = source.lower()
             for keyword in ("match (", "merge ", "create ", "delete ", "set "):
                 assert keyword not in lowered, f"{tool.name} contains inline Cypher: {keyword}"
+
+    def test_the_non_graph_handlers_do_not_touch_a_database_directly(self) -> None:
+        """Rule 4 for the two tools that are not graph reads.
+
+        `save_draft` must go through write-api and `get_run_state` through the
+        checkpoint reader. A handler that opened its own engine, or wrote SQL,
+        would satisfy every other assertion in this file — none of them look at
+        these two, since neither calls `queries.`.
+        """
+        for name in ("save_draft", "get_run_state"):
+            source = inspect.getsource(TOOLS_BY_NAME[name].handler).lower()
+            for smell in ("insert into", "update ", "create_async_engine", "text(", "execute("):
+                assert smell not in source, f"{name} touches a database directly: {smell}"
+
+    def test_save_draft_delegates_to_the_write_api_client(self) -> None:
+        source = inspect.getsource(TOOLS_BY_NAME["save_draft"].handler)
+        assert "put_draft" in source
+
+    def test_get_run_state_delegates_to_the_checkpoint_reader(self) -> None:
+        source = inspect.getsource(TOOLS_BY_NAME["get_run_state"].handler)
+        assert "load_run" in source
 
     def test_every_handler_calls_its_query_function_with_valid_keywords(self) -> None:
         """Wrapping a function is only safe if the call actually binds.
@@ -109,7 +184,7 @@ class TestNoRawQueryToolExists:
         against the target's real signature, so the binding is verified without
         a database.
         """
-        for tool in TOOLS:
+        for tool in (TOOLS_BY_NAME[name] for name in sorted(GRAPH_TOOLS)):
             tree = ast.parse(textwrap.dedent(inspect.getsource(tool.handler)))
             for node in ast.walk(tree):
                 if not isinstance(node, ast.Call):

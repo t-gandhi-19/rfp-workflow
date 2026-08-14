@@ -1,7 +1,18 @@
 """mcp-server — the only path an agent has to the graph (§2, CLAUDE.md rule 4).
 
 Six read tools, each wrapping a tested, parameterised function in
-`src.graph.queries`. No tool accepts Cypher, and none writes.
+`src.graph.queries`, plus the two Phase 4 tools that are not graph reads:
+`save_draft` and `get_run_state`. No tool accepts Cypher.
+
+**Nothing here writes to a database.** `save_draft` writes through write-api,
+forwarding the CALLER's token, so rule 4 holds and the row records who actually
+asked rather than recording that mcp-server did. `get_run_state` reads Postgres
+with the SELECT-only identity — the same read-direct/write-through asymmetry as
+`src/evals/store.py`.
+
+**Roles are per tool, not per route.** Graph reads need `kg-reader`, saving a
+draft needs `draft-writer`, and reading a run needs `rfp-reader`. Putting all
+three behind one role would have made a retrieval grant a write grant.
 
 **Auth is the write-api's, imported rather than reimplemented.** Same
 `TokenVerifier`, same RS256/JWKS/audience/issuer checks, same `require_role`
@@ -33,9 +44,11 @@ from neo4j import READ_ACCESS
 from pydantic import BaseModel, ConfigDict, ValidationError
 
 from src.graph.driver import close_driver, get_driver
+from src.mcp_server.context import ToolContext
 from src.mcp_server.tools import KG_READER, TOOLS, TOOLS_BY_NAME, ToolSpec
+from src.mcp_server.write_client import WriteApiError
 from src.observability.logging import configure_app_logging
-from src.write_api.auth import Principal, build_verifier, require_role
+from src.write_api.auth import Principal, build_verifier, current_principal, require_role
 from src.write_api.settings import get_settings
 
 logger = logging.getLogger("rfp.mcp")
@@ -91,6 +104,27 @@ async def list_tools(
     return ToolManifest(tools=[tool.schema() for tool in TOOLS])
 
 
+def _bearer_token(request: Request) -> str:
+    """The caller's raw token, for the one tool that forwards it.
+
+    Read off the request rather than reconstructed, because it is forwarded
+    verbatim to write-api and anything reconstructed would be a different token
+    with a different subject.
+    """
+    header = request.headers.get("authorization", "")
+    scheme, _, credentials = header.partition(" ")
+    if scheme.lower() != "bearer" or not credentials:
+        # Unreachable: `current_principal` has already verified this token.
+        # Raised rather than asserted so a future change to the dependency
+        # chain fails here instead of forwarding an empty Authorization header.
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Missing bearer token",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    return credentials
+
+
 def _resolve(name: str) -> ToolSpec:
     tool = TOOLS_BY_NAME.get(name)
     if tool is None:
@@ -108,7 +142,8 @@ def _resolve(name: str) -> ToolSpec:
 async def invoke_tool(
     name: str,
     payload: dict[str, Any],
-    principal: Annotated[Principal, Depends(require_role(KG_READER))],
+    request: Request,
+    principal: Annotated[Principal, Depends(current_principal)],
 ) -> JSONResponse:
     """Validate, run the wrapped query, log the caller, return the contract.
 
@@ -118,6 +153,28 @@ async def invoke_tool(
     what makes a boundary failure readable instead of a stack trace.
     """
     tool = _resolve(name)
+
+    # THE ROLE IS CHECKED BEFORE THE SCHEMA, and per tool rather than on the
+    # route. Per tool because `save_draft` writes and `get_run_state` reads a
+    # run record — neither is graph read access, and putting all three behind
+    # `kg-reader` would have made a retrieval grant a write grant. Before the
+    # schema because a 422 naming the fields of a tool you may not invoke tells
+    # an unauthorised caller the shape of what it cannot call.
+    if not principal.has_role(tool.required_role):
+        logger.info(
+            "mcp.tool.forbidden subject=%s client=%s tool=%s needs=%s",
+            principal.subject,
+            principal.client_id,
+            name,
+            tool.required_role,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=(
+                f"Role '{tool.required_role}' is required; caller {principal.client_id} "
+                f"does not hold it"
+            ),
+        )
 
     try:
         parsed = tool.input_model.model_validate(payload)
@@ -145,13 +202,32 @@ async def invoke_tool(
         ) from exc
 
     started = time.perf_counter()
-    driver = get_driver()
+    token = _bearer_token(request) if tool.needs_token else None
     try:
-        # READ access mode: Neo4j itself refuses a write on this session, so
-        # "these tools are read-only" is enforced by the database rather than by
-        # the absence of a write tool.
-        async with driver.session(default_access_mode=READ_ACCESS) as session:
-            result = await tool.handler(session, parsed)
+        if tool.needs_graph:
+            # READ access mode: Neo4j itself refuses a write on this session, so
+            # "the graph tools are read-only" is enforced by the database rather
+            # than by the absence of a write tool. `save_draft` writes, and it
+            # does not get one of these — it goes through write-api.
+            async with get_driver().session(default_access_mode=READ_ACCESS) as session:
+                result = await tool.handler(
+                    ToolContext(principal=principal, session=session, token=token), parsed
+                )
+        else:
+            result = await tool.handler(
+                ToolContext(principal=principal, session=None, token=token), parsed
+            )
+    except WriteApiError as exc:
+        # The write path failing is not the caller's mistake, and it is not an
+        # internal error either — it is a downstream refusal the caller can act
+        # on by retrying later.
+        logger.warning(
+            "mcp.tool.write_failed subject=%s tool=%s reason=%s", principal.subject, name, exc
+        )
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail={"tool": name, "message": str(exc)},
+        ) from exc
     except ValueError as exc:
         # A contract-shaped complaint raised by the handler (a wrong-width
         # embedding, an empty requesting_customer). Same 422 as a schema
