@@ -56,6 +56,7 @@ from src.controller.protocols import AgentValidationError
 from src.extraction.questions import parse_questions
 from src.gateway.client import GatewayClient
 from src.guardrails.injection import wrap
+from src.observability.tracing import llm_span
 from src.prompts import load_prompt
 from src.retrieval.calibration import CalibrationArtifact, load_for_current_corpus
 from src.retrieval.retriever import Reranker, retrieve
@@ -141,8 +142,10 @@ class CrewAgentLayer:
             agent=agent,
             output_model=TriageResult,
         )
-        crew = build_crew(agent=agent, task=task)
-        output = await crew.kickoff_async()
+        with llm_span(
+            step="triage", prompt_version=prompt.version_tag, model_alias=prompt.model_alias
+        ):
+            output = await build_crew(agent=agent, task=task).kickoff_async()
         budget.record(_usage_from(output))
 
         result = _require(output, TriageResult, step="triage")
@@ -270,7 +273,10 @@ class CrewAgentLayer:
             agent=agent,
             output_model=DraftPayload,
         )
-        output = await build_crew(agent=agent, task=task).kickoff_async()
+        with llm_span(
+            step="drafter", prompt_version=prompt.version_tag, model_alias=prompt.model_alias
+        ):
+            output = await build_crew(agent=agent, task=task).kickoff_async()
         budget.record(_usage_from(output))
 
         payload = _require(output, DraftPayload, step="drafter")
@@ -345,7 +351,10 @@ class CrewAgentLayer:
             agent=agent,
             output_model=CritiqueResult,
         )
-        output = await build_crew(agent=agent, task=task).kickoff_async()
+        with llm_span(
+            step="critic", prompt_version=prompt.version_tag, model_alias=prompt.model_alias
+        ):
+            output = await build_crew(agent=agent, task=task).kickoff_async()
         budget.record(_usage_from(output))
 
         critique = _require(output, CritiqueResult, step="critic")

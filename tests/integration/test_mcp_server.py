@@ -140,7 +140,26 @@ def valid_payloads(embedding: list[float]) -> dict[str, dict[str, Any]]:
         "entity_exists": {"name": "CloudNova Partners", "entity_type": "vendor"},
         "get_sme_for_capability": {"capability_id": "CAP-0001"},
         "coverage_gaps": {"rfp_id": "HRFP-CUS-0001"},
+        # Phase 4. `get_run_state` is a read `retriever-sa` holds `rfp-reader`
+        # for, so it belongs in this sweep; an unknown id returns `state: null`,
+        # which is a 200 and satisfies the published contract.
+        "get_run_state": {"run_id": "a-run-that-does-not-exist"},
     }
+
+
+#: Tools this sweep cannot exercise as `retriever-sa`, and why.
+#:
+#: `save_draft` requires `draft-writer`, which `retriever-sa` deliberately does
+#: not hold — that refusal is the POINT and is asserted in
+#: `tests/integration/test_mcp_write_surface.py`, in both directions. Listing it
+#: here rather than dropping it silently keeps the sweep derived from
+#: `TOOLS_BY_NAME`: a new tool is covered by default and an exclusion has to be
+#: written down with its reason.
+NOT_INVOCABLE_BY_RETRIEVER = {"save_draft"}
+
+
+def sweepable_tools() -> list[str]:
+    return sorted(set(TOOLS_BY_NAME) - NOT_INVOCABLE_BY_RETRIEVER)
 
 
 # ---------------------------------------------------------------------------
@@ -157,11 +176,11 @@ class TestTheServiceIsUp:
 
 
 class TestEveryToolAnswersAnAuthorisedCaller:
-    """All six, individually. A suite that exercised one tool and asserted the
+    """Each one individually. A suite that exercised one tool and asserted the
     others 'work the same way' would miss exactly the tool whose handler was
     wired to the wrong query function."""
 
-    @pytest.mark.parametrize("tool_name", sorted(TOOLS_BY_NAME))
+    @pytest.mark.parametrize("tool_name", sweepable_tools())
     async def test_retriever_sa_can_invoke_it(
         self, http: httpx.AsyncClient, tool_name: str
     ) -> None:
@@ -170,7 +189,7 @@ class TestEveryToolAnswersAnAuthorisedCaller:
         response = await call_tool(http, tool_name, payload, token)
         assert response.status_code == 200, response.text
 
-    @pytest.mark.parametrize("tool_name", sorted(TOOLS_BY_NAME))
+    @pytest.mark.parametrize("tool_name", sweepable_tools())
     async def test_its_response_satisfies_its_published_output_contract(
         self, http: httpx.AsyncClient, tool_name: str
     ) -> None:

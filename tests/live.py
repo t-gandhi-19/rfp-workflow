@@ -12,7 +12,9 @@ command to fix it.
 from __future__ import annotations
 
 import os
+import shutil
 import socket
+import subprocess
 from collections.abc import Callable
 
 import httpx
@@ -147,6 +149,60 @@ def require_neo4j() -> None:
     """
     require(tcp_open("Neo4j Bolt", *neo4j_bolt()))
     require_env(*NEO4J_SECRETS)
+
+
+def docker_cli() -> str | None:
+    """The docker CLI, under either name it goes by here.
+
+    `docker` on a Linux runner; `docker.exe` from WSL on the Windows build host,
+    where Docker Desktop runs on the Windows side and WSL interop is how a Linux
+    shell reaches it. Naming both is the difference between the container-log
+    assertions RUNNING on the developing machine and being skipped there — and
+    they are the only assertions that the audit trail exists at all, so a skip
+    would mean nobody had checked.
+
+    That is not hypothetical: the per-call log was silently discarded by uvicorn
+    until those tests ran against the container and found nothing there.
+
+    ORDER MATTERS on the Windows host. Docker Desktop puts BOTH names on the
+    PATH a WSL shell inherits, and the Linux-side `docker` is a shim that exits
+    non-zero with "could not be found in this WSL 2 distro" unless WSL
+    integration is enabled. Preferring `docker.exe` picks the one that answers;
+    on a Linux runner `docker.exe` does not exist, so the order costs nothing.
+
+    Lives here rather than in one test module because two files now read
+    container logs, and a second copy of this reasoning would drift from the
+    first the next time the host changes.
+    """
+    for name in ("docker.exe", "docker"):
+        resolved = shutil.which(name)
+        if resolved is not None:
+            return resolved
+    return None
+
+
+def container_log(container: str, *, tail: int = 400) -> str:
+    """The container's OWN emitted output.
+
+    Never caplog: the claim these assertions make is about what the DEPLOYED
+    service records, and an in-process capture proves only that a logging call
+    exists in the source.
+    """
+    resolved = docker_cli()
+    if resolved is None:
+        pytest.skip("docker CLI not available; cannot read the container's log")
+    result = subprocess.run(  # noqa: S603
+        [resolved, "logs", "--tail", str(tail), container],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        # Both streams. The WSL shim reports its refusal on stdout, so a
+        # stderr-only message left this skip blank and unexplained.
+        reason = (result.stderr.strip() or result.stdout.strip() or "no output").splitlines()
+        pytest.skip(f"cannot read logs for {container}: {reason[0]}")
+    return result.stdout + result.stderr
 
 
 #: Secrets the mcp-server integration tests authenticate with. `retriever-sa` is

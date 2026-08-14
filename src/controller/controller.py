@@ -74,6 +74,13 @@ from src.controller.protocols import (
     GuardrailSuite,
     RunCheckpointer,
 )
+from src.observability.tracing import (
+    question_span,
+    record_failure,
+    run_span,
+    stage_span,
+    trace_url,
+)
 from src.retrieval.confidence import compute_confidence
 
 logger = logging.getLogger("rfp.controller")
@@ -172,40 +179,57 @@ class RunController:
             self.ledger.tokens_used = resumed.state.tokens_used
             self.ledger.cost_usd = resumed.state.cost_usd
 
-        async with httpx.AsyncClient(timeout=self.checkpointer.timeout) as client:
-            self._client = client
-            await self._checkpoint(state)
+        # `run_span` is a SYNC context manager and the client an async one, so
+        # they cannot share one `async with` — mypy caught that here rather than
+        # it surfacing as an AttributeError mid-run.
+        with run_span(run_id=run_id, rfp_id=document.id):
+            async with httpx.AsyncClient(timeout=self.checkpointer.timeout) as client:
+                self._client = client
+                return await self._run_stages(document, run_id, state, resumed)
 
-            try:
-                questions = await self._parse_and_extract(document, state)
-                outcomes = await self._fan_out(document, questions, state, resumed)
-            except RunHaltedError as halt:
-                return await self._halt(state, halt, document=document)
+    async def _run_stages(
+        self,
+        document: RFPDocument,
+        run_id: str,
+        state: RunState,
+        resumed: ResumableRun | None,
+    ) -> RunResult:
+        """The stage sequence, with the run span and the client already open."""
+        await self._checkpoint(state)
 
-            compliance = await self._check_compliance(questions, outcomes, state)
-            artifacts = await self._assemble(document, questions, outcomes, state)
+        try:
+            questions = await self._parse_and_extract(document, state)
+            outcomes = await self._fan_out(document, questions, state, resumed)
+        except RunHaltedError as halt:
+            record_failure(halt)
+            return await self._halt(state, halt, document=document)
 
-            state = await self._advance(state, RunStage.COMPLETE)
-            return RunResult(
-                run_id=run_id,
-                answers=[o.answer for o in outcomes if o.answer is not None],
-                compliance=compliance,
-                totals=self._totals(questions, outcomes),
-                artifact_paths=artifacts,
-            )
+        compliance = await self._check_compliance(questions, outcomes, state)
+        artifacts = await self._assemble(document, questions, outcomes, state)
+
+        state = await self._advance(state, RunStage.COMPLETE)
+        return RunResult(
+            run_id=run_id,
+            answers=[o.answer for o in outcomes if o.answer is not None],
+            compliance=compliance,
+            totals=self._totals(questions, outcomes),
+            trace_url=trace_url(run_id),
+            artifact_paths=artifacts,
+        )
 
     async def _parse_and_extract(
         self, document: RFPDocument, state: RunState
     ) -> list[ExtractedQuestion]:
         state = await self._advance(state, RunStage.PARSING)
-        try:
-            triage = await self.agents.triage(document, budget=self.ledger)
-        except (RunBudgetError, JudgeInProductionError) as exc:
-            raise RunHaltedError(HaltReason.BUDGET, str(exc)) from exc
-        except Exception as exc:
-            # Triage is the run's first act. There is no partial result to keep
-            # and no per-question blast radius to fall back to.
-            raise RunHaltedError(HaltReason.INFRA, f"triage failed: {exc}") from exc
+        with stage_span(RunStage.PARSING.value):
+            try:
+                triage = await self.agents.triage(document, budget=self.ledger)
+            except (RunBudgetError, JudgeInProductionError) as exc:
+                raise RunHaltedError(HaltReason.BUDGET, str(exc)) from exc
+            except Exception as exc:
+                # Triage is the run's first act. There is no partial result to
+                # keep and no per-question blast radius to fall back to.
+                raise RunHaltedError(HaltReason.INFRA, f"triage failed: {exc}") from exc
 
         if not triage.domain_match:
             raise RunHaltedError(
@@ -215,12 +239,13 @@ class RunController:
             )
 
         state = await self._advance(state, RunStage.EXTRACTING)
-        try:
-            questions = await self.agents.extract(document, budget=self.ledger)
-        except (RunBudgetError, JudgeInProductionError) as exc:
-            raise RunHaltedError(HaltReason.BUDGET, str(exc)) from exc
-        except Exception as exc:
-            raise RunHaltedError(HaltReason.INFRA, f"extraction failed: {exc}") from exc
+        with stage_span(RunStage.EXTRACTING.value):
+            try:
+                questions = await self.agents.extract(document, budget=self.ledger)
+            except (RunBudgetError, JudgeInProductionError) as exc:
+                raise RunHaltedError(HaltReason.BUDGET, str(exc)) from exc
+            except Exception as exc:
+                raise RunHaltedError(HaltReason.INFRA, f"extraction failed: {exc}") from exc
 
         if not questions:
             raise RunHaltedError(
@@ -247,13 +272,14 @@ class RunController:
         await self._advance(state, RunStage.DRAFTING)
         semaphore = asyncio.Semaphore(self.limits.concurrency.question_fanout)
 
-        results = await asyncio.gather(
-            *(
-                self._run_question(document, question, state, semaphore, resumed)
-                for question in questions
-            ),
-            return_exceptions=True,
-        )
+        with stage_span(RunStage.DRAFTING.value):
+            results = await asyncio.gather(
+                *(
+                    self._run_question(document, question, state, semaphore, resumed)
+                    for question in questions
+                ),
+                return_exceptions=True,
+            )
 
         outcomes: list[QuestionOutcome] = []
         halt: RunHaltedError | None = None
@@ -298,31 +324,44 @@ class RunController:
             logger.info("run %s: question %s already complete, skipping", state.run_id, question.id)
             return self._outcome_from_existing(question, answer)
 
+        # The span is INSIDE the semaphore, so its duration is the question's
+        # work rather than its work plus however long it waited for a slot. A
+        # span that included the wait would make every question after the first
+        # five look slow in a way no code change could fix.
         async with semaphore:
-            try:
-                return await self._pipeline(document, question, state)
-            except RunHaltedError:
-                raise
-            except (RunBudgetError, JudgeInProductionError) as exc:
-                raise RunHaltedError(HaltReason.BUDGET, str(exc)) from exc
-            except QuestionBudgetError as exc:
-                return await self._escalated(
-                    question, state, EscalationTrigger.VALIDATION_FAILED, str(exc)
-                )
-            except Exception as exc:
-                logger.warning(
-                    "run %s: question %s failed (%s: %s)",
-                    state.run_id,
-                    question.id,
-                    type(exc).__name__,
-                    exc,
-                )
-                return await self._escalated(
-                    question,
-                    state,
-                    EscalationTrigger.STAGE_ERROR,
-                    f"{type(exc).__name__}: {exc}",
-                )
+            with question_span(question.id):
+                return await self._guarded_pipeline(document, question, state)
+
+    async def _guarded_pipeline(
+        self, document: RFPDocument, question: ExtractedQuestion, state: RunState
+    ) -> QuestionOutcome:
+        """The per-question blast radius, with the span already open."""
+        try:
+            return await self._pipeline(document, question, state)
+        except RunHaltedError:
+            raise
+        except (RunBudgetError, JudgeInProductionError) as exc:
+            raise RunHaltedError(HaltReason.BUDGET, str(exc)) from exc
+        except QuestionBudgetError as exc:
+            record_failure(exc)
+            return await self._escalated(
+                question, state, EscalationTrigger.VALIDATION_FAILED, str(exc)
+            )
+        except Exception as exc:
+            record_failure(exc)
+            logger.warning(
+                "run %s: question %s failed (%s: %s)",
+                state.run_id,
+                question.id,
+                type(exc).__name__,
+                exc,
+            )
+            return await self._escalated(
+                question,
+                state,
+                EscalationTrigger.STAGE_ERROR,
+                f"{type(exc).__name__}: {exc}",
+            )
 
     async def _pipeline(
         self, document: RFPDocument, question: ExtractedQuestion, state: RunState
@@ -473,11 +512,12 @@ class RunController:
         state: RunState,
     ) -> list[ComplianceResult]:
         await self._advance(state, RunStage.COMPLIANCE)
-        by_id = {o.question.id: o for o in outcomes}
-        return [
-            self.compliance.check(question, _answer_for(by_id.get(question.id)))
-            for question in questions
-        ]
+        with stage_span(RunStage.COMPLIANCE.value):
+            by_id = {o.question.id: o for o in outcomes}
+            return [
+                self.compliance.check(question, _answer_for(by_id.get(question.id)))
+                for question in questions
+            ]
 
     async def _assemble(
         self,
@@ -487,14 +527,15 @@ class RunController:
         state: RunState,
     ) -> ArtifactPaths:
         await self._advance(state, RunStage.ASSEMBLING)
-        answers = {o.question.id: o.answer for o in outcomes if o.answer is not None}
-        written = self.assembler.assemble(
-            run_id=state.run_id,
-            document=document,
-            questions=questions,
-            answers=answers,
-            escalations=self._escalations_record(state, document, outcomes),
-        )
+        with stage_span(RunStage.ASSEMBLING.value):
+            answers = {o.question.id: o.answer for o in outcomes if o.answer is not None}
+            written = self.assembler.assemble(
+                run_id=state.run_id,
+                document=document,
+                questions=questions,
+                answers=answers,
+                escalations=self._escalations_record(state, document, outcomes),
+            )
         return ArtifactPaths(
             response_docx=written.get("response_docx"),
             escalations_json=written.get("escalations_json"),
@@ -547,7 +588,12 @@ class RunController:
     # -- checkpointing ----------------------------------------------------
 
     async def _advance(self, state: RunState, stage: RunStage) -> RunState:
-        """Move to `stage` and checkpoint. Called at every transition (§13)."""
+        """Move to `stage` and checkpoint. Called at every transition (§13).
+
+        The stage SPAN is opened separately, in `_staged`, because a span is a
+        duration and this is an instant. Emitting one here would produce seven
+        zero-length spans that record the transitions and none of the work.
+        """
         state.stage = stage
         state.updated_at = _now()
         state.tokens_used = self.ledger.tokens_used

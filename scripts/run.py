@@ -33,6 +33,7 @@ from src.graph import driver as graph_driver
 from src.graph import queries
 from src.guardrails.suite import DeterministicGuardrails
 from src.observability.logging import configure_logging
+from src.observability.tracing import configure_tracing, instrument_httpx, tracing_status
 
 logger = logging.getLogger("rfp.run")
 
@@ -79,6 +80,14 @@ async def execute(
     *, file: Path | None, customer: str, resume_run: str | None, out_dir: Path
 ) -> RunResult:
     configure_logging()
+    status = configure_tracing("rfp-controller")
+    # Instrumenting httpx is THE JOIN (§19): every outbound call — to the
+    # gateway, to write-api, to mcp-server — carries a traceparent, so our spans
+    # and LiteLLM's proxy-side spans land in one trace rather than being
+    # correlated afterwards by run id or by timestamp.
+    instrument_httpx()
+    logger.info("%s", status.summary)
+
     async with graph_driver.session() as session:
         agents = CrewAgentLayer(session=session)  # type: ignore[arg-type]
         routing = await _sme_routing(session)
@@ -141,6 +150,8 @@ def main() -> int:
                 "failed": result.totals.failed,
                 "tokens_used": result.totals.tokens_used,
                 "cost_usd": result.totals.cost_usd,
+                "trace_url": result.trace_url,
+                "tracing": tracing_status().summary,
                 "artifacts": result.artifact_paths.model_dump(mode="json"),
             },
             indent=2,

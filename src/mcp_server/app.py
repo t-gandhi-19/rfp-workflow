@@ -48,6 +48,13 @@ from src.mcp_server.context import ToolContext
 from src.mcp_server.tools import KG_READER, TOOLS, TOOLS_BY_NAME, ToolSpec
 from src.mcp_server.write_client import WriteApiError
 from src.observability.logging import configure_app_logging
+from src.observability.tracing import (
+    attach_subject,
+    configure_tracing,
+    instrument_fastapi,
+    instrument_httpx,
+    tool_span,
+)
 from src.write_api.auth import Principal, build_verifier, current_principal, require_role
 from src.write_api.settings import get_settings
 
@@ -67,6 +74,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # src/observability/logging.py — this is the fix for a real, found defect,
     # not a precaution.
     configure_app_logging()
+    # §19: an inbound traceparent is CONTINUED, so this server's spans are
+    # children of the run that called it rather than roots of their own. Without
+    # this, a tool call would appear in a trace UI as an unrelated trace that
+    # merely happened at the same time.
+    configure_tracing("rfp-mcp-server")
+    instrument_fastapi(app)
+    instrument_httpx()
     app.state.verifier = build_verifier()
     app.state.settings = get_settings()
     yield
@@ -153,6 +167,9 @@ async def invoke_tool(
     what makes a boundary failure readable instead of a stack trace.
     """
     tool = _resolve(name)
+    # The JWT subject on the span is what joins a Postgres row's `written_by`
+    # to the trace that produced it.
+    attach_subject(principal.subject)
 
     # THE ROLE IS CHECKED BEFORE THE SCHEMA, and per tool rather than on the
     # route. Per tool because `save_draft` writes and `get_run_state` reads a
@@ -204,19 +221,24 @@ async def invoke_tool(
     started = time.perf_counter()
     token = _bearer_token(request) if tool.needs_token else None
     try:
-        if tool.needs_graph:
-            # READ access mode: Neo4j itself refuses a write on this session, so
-            # "the graph tools are read-only" is enforced by the database rather
-            # than by the absence of a write tool. `save_draft` writes, and it
-            # does not get one of these — it goes through write-api.
-            async with get_driver().session(default_access_mode=READ_ACCESS) as session:
+        # The span wraps only the tool's own work: role and schema failures are
+        # already 403s and 422s above, and a span covering them would put a
+        # rejected call's duration next to a real one's.
+        with tool_span(name):
+            if tool.needs_graph:
+                # READ access mode: Neo4j itself refuses a write on this
+                # session, so "the graph tools are read-only" is enforced by the
+                # database rather than by the absence of a write tool.
+                # `save_draft` writes, and it does not get one of these — it
+                # goes through write-api.
+                async with get_driver().session(default_access_mode=READ_ACCESS) as session:
+                    result = await tool.handler(
+                        ToolContext(principal=principal, session=session, token=token), parsed
+                    )
+            else:
                 result = await tool.handler(
-                    ToolContext(principal=principal, session=session, token=token), parsed
+                    ToolContext(principal=principal, session=None, token=token), parsed
                 )
-        else:
-            result = await tool.handler(
-                ToolContext(principal=principal, session=None, token=token), parsed
-            )
     except WriteApiError as exc:
         # The write path failing is not the caller's mistake, and it is not an
         # internal error either — it is a downstream refusal the caller can act

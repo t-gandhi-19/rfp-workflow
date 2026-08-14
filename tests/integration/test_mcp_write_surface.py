@@ -24,6 +24,7 @@ import httpx
 import pytest
 
 from src.contracts import DraftedAnswer, RunState
+from tests import live
 from tests.live import mcp_base, require_mcp_server, require_write_api_and_keycloak
 
 pytestmark = [pytest.mark.integration, pytest.mark.anyio]
@@ -247,3 +248,49 @@ class TestTheManifest:
         names = {tool["name"] for tool in response.json()["tools"]}
         assert {"save_draft", "get_run_state"} <= names
         assert len(names) == 8
+
+
+class TestTheWriteIsInTheContainersOwnLog:
+    """The audit-trail lesson, applied to the new write path.
+
+    Read from the CONTAINER'S log, never from caplog: the claim is about what
+    the DEPLOYED service records, and an in-process capture would prove only
+    that a logging call exists in the source. That distinction has already cost
+    this repository once — uvicorn leaves the root logger bare, so every audit
+    line was being discarded in the container while the unit tests were green.
+    """
+
+    def container_log(self, container: str) -> str:
+        return live.container_log(container)
+
+    async def test_the_write_tool_is_logged_by_mcp_server(self, http: httpx.AsyncClient) -> None:
+        run_id = f"mcpl-{uuid.uuid4().hex[:10]}"
+        await seed_run(http, run_id)
+        token = await token_for(http, "drafter-sa", "DRAFTER_SA_SECRET")
+        response = await call(http, "save_draft", {"run_id": run_id, "answer": answer()}, token)
+        assert response.status_code == 200, response.text
+        assert "tool=save_draft" in self.container_log("rfp-workflow-mcp-server-1")
+
+    async def test_the_refusal_is_logged_too(self, http: httpx.AsyncClient) -> None:
+        """A refused write is the more interesting audit line of the two."""
+        token = await token_for(http, "retriever-sa", "RETRIEVER_SA_SECRET")
+        await call(http, "save_draft", {"run_id": "any", "answer": answer()}, token)
+        log = self.container_log("rfp-workflow-mcp-server-1")
+        assert "mcp.tool.forbidden" in log
+        assert "needs=draft-writer" in log
+
+    async def test_write_api_recorded_the_forwarded_subject(self, http: httpx.AsyncClient) -> None:
+        """End of the chain: mcp-server forwarded the caller's token, write-api
+        verified it and returned the subject it stamped on the row.
+
+        Asserted through the response rather than the log because write-api's
+        `written_by` IS the value that lands in Postgres — the log would be a
+        second rendering of it, and the row is what an audit reads.
+        """
+        run_id = f"mcpl-{uuid.uuid4().hex[:10]}"
+        await seed_run(http, run_id)
+        token = await token_for(http, "drafter-sa", "DRAFTER_SA_SECRET")
+        response = await call(http, "save_draft", {"run_id": run_id, "answer": answer()}, token)
+        written_by = response.json()["written_by"]
+        assert written_by
+        assert "mcp" not in written_by.lower()
