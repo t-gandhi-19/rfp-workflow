@@ -20,6 +20,8 @@ from src.gateway.model_pins import (
     DEFAULT_LITELLM_CONFIG,
     GatewayModel,
     drifting_models,
+    model_family,
+    parse_alias_references,
     parse_gateway_models,
 )
 from src.gateway.preflight import check_tags_are_explicit
@@ -148,3 +150,57 @@ class TestTheShippedConfig:
 
     def test_the_config_path_is_the_real_one(self) -> None:
         assert DEFAULT_LITELLM_CONFIG.is_file()
+
+
+class TestFamilyExtraction:
+    @pytest.mark.parametrize(
+        ("reference", "expected"),
+        [
+            ("groq/llama-3.3-70b-versatile", "llama"),
+            ("groq/qwen/qwen3-32b", "qwen"),
+            ("ollama/llama3.2:3b", "llama"),
+            ("ollama/llama3.1:8b", "llama"),
+            ("ollama/nomic-embed-text:v1.5", "nomic"),
+        ],
+    )
+    def test_version_size_and_vendor_are_stripped(self, reference: str, expected: str) -> None:
+        assert model_family(reference) == expected
+
+    def test_the_same_family_on_two_providers_is_still_one_family(self) -> None:
+        """The comparison that matters is 'same weights lineage', not 'same
+        provider'. A judge on `ollama/llama3.2` grading a drafter on
+        `groq/llama-3.3-70b` is the self-grading D16 forbids, even though the
+        two references share no prefix at all."""
+        assert model_family("ollama/llama3.2:3b") == model_family("groq/llama-3.3-70b-versatile")
+
+
+class TestTheJudgeIsNotSelfGrading:
+    """D16, made structural rather than left in a config comment.
+
+    The gateway config says "A different model family from the drafter on
+    purpose" above `judge-model`. That sentence is the only thing that was
+    holding the requirement: pointing judge-model at
+    `groq/llama-3.3-70b-versatile` would have kept every test in the repository
+    green — including the prompt-contract test, since the PROMPT would still
+    say different-family — while making every quality number in the eval report
+    a model's opinion of its own prose.
+    """
+
+    def test_the_judge_alias_exists_in_the_gateway(self) -> None:
+        assert "judge-model" in parse_alias_references()
+
+    def test_the_judge_is_a_different_family_from_the_drafter(self) -> None:
+        references = parse_alias_references()
+        judge = model_family(references["judge-model"])
+        drafter = model_family(references["drafter-model"])
+        assert judge != drafter, (
+            f"judge-model and drafter-model are both the '{judge}' family. "
+            f"D16 requires a different family so a model never grades its own prose."
+        )
+
+    def test_the_judge_is_a_different_family_from_the_critic(self) -> None:
+        """The critic already scored this answer and lowered its confidence. A
+        judge of the same family re-applying the same priors is not the
+        independent measurement the report presents it as."""
+        references = parse_alias_references()
+        assert model_family(references["judge-model"]) != model_family(references["critic-model"])

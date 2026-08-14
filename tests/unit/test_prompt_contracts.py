@@ -18,7 +18,13 @@ import pytest
 from src.prompts import load_prompt
 
 #: Prompts that receive RFP document content and must therefore say so.
-CONTENT_FACING = ("triage", "drafter", "critic", "extract_assist")
+#:
+#: `judge` belongs here despite running only in evals: it is handed drafted
+#: answers and retrieved sources, both of which descend from the untrusted
+#: document. An injected instruction that cannot reach a drafter but CAN reach
+#: the thing that scores drafters would corrupt the measurement instead of the
+#: output, which is harder to notice and no less wrong.
+CONTENT_FACING = ("triage", "drafter", "critic", "extract_assist", "judge")
 
 
 def body(name: str) -> str:
@@ -130,6 +136,50 @@ class TestTheExtractAssistPrompt:
         assert "do not answer it" in body("extract_assist")
 
 
+class TestTheJudgePrompt:
+    """D16: a different-family judge, a versioned rubric, and eval runs only."""
+
+    def test_it_states_that_it_never_runs_in_production(self) -> None:
+        """The judge alias is a THIRD provider call per answer. A judge that
+        crept into a production run would breach the hard call budget and pay
+        for a score nobody reads — the controller forbids it, and the prompt
+        says so too, so a reader of either learns the rule."""
+        assert "this runs in eval runs only" in body("judge")
+
+    def test_it_states_the_different_family_requirement_and_why(self) -> None:
+        """The requirement is not "a different alias". It is a different FAMILY,
+        because self-agreement is the failure being avoided."""
+        assert "you are a different model family from the drafter" in body("judge")
+        assert "grading its own prose" in body("judge")
+
+    def test_it_defers_to_the_rubric_rather_than_restating_it(self) -> None:
+        """The anchors live in config/rubrics/quality_rubric.md and are rendered
+        in. Restating them here would be the two-copies-of-one-text drift that
+        rule 17 forbids for prompts, with the added edge that the human
+        spot-check reads the rubric file — so a judge scoring against its own
+        inlined copy would make judge-vs-human agreement meaningless."""
+        assert "the rubric is the only scale" in body("judge")
+        assert "{rubric}" in load_prompt("judge").body
+        assert "rubric" in load_prompt("judge").placeholders
+
+    def test_it_carries_the_rubric_scoring_rules(self) -> None:
+        assert "score only what is written" in body("judge")
+        assert "guardrail violations are not a quality dimension" in body("judge")
+
+    def test_it_separates_groundedness_from_quality(self) -> None:
+        """The failure mode this exists for: fluent prose asserting something no
+        source states scores well on tone and must still fail grounding."""
+        assert "groundedness is a separate judgement from quality" in body("judge")
+
+    def test_it_requires_verbatim_ungrounded_spans(self) -> None:
+        """The harness matches the spans back against the sources, so a
+        paraphrase is unusable."""
+        assert "quote it, do not summarise it" in body("judge")
+
+    def test_it_does_not_ask_the_judge_to_rewrite_or_answer(self) -> None:
+        assert "nothing you say can change the answer you are scoring" in body("judge")
+
+
 class TestEveryPromptNamesItsTier:
     """A drafter prompt sent to the triage model is a silent quality regression,
     and the file is the only place that pairing is recorded."""
@@ -142,6 +192,7 @@ class TestEveryPromptNamesItsTier:
             ("rerank", "rerank-model"),
             ("drafter", "drafter-model"),
             ("critic", "critic-model"),
+            ("judge", "judge-model"),
         ],
     )
     def test_the_alias_matches_the_roster(self, name: str, alias: str) -> None:
@@ -151,3 +202,12 @@ class TestEveryPromptNamesItsTier:
         """Rule: drafter and critic are the two quality-critical steps."""
         assert load_prompt("drafter").model_alias == "drafter-model"
         assert load_prompt("critic").model_alias == "critic-model"
+
+    def test_the_judge_is_not_on_the_drafter_alias(self) -> None:
+        """The whole point of the judge tier, asserted where the aliases live.
+
+        `judge-model` resolving to the drafter's alias would satisfy every other
+        test in this file — the prompt would still SAY different-family — while
+        quietly making the quality numbers self-graded.
+        """
+        assert load_prompt("judge").model_alias != load_prompt("drafter").model_alias

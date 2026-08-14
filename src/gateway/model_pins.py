@@ -101,3 +101,44 @@ def parse_gateway_models(path: Path | None = None) -> list[GatewayModel]:
 
 def drifting_models(models: list[GatewayModel]) -> list[GatewayModel]:
     return [model for model in models if model.is_drifting]
+
+
+def parse_alias_references(path: Path | None = None) -> dict[str, str]:
+    """Every alias in the gateway config, Ollama or not, to its model reference.
+
+    The Ollama-only view above answers "is this pinned". This answers "what is
+    actually behind this alias", which is a different question and the one D16
+    turns on.
+    """
+    resolved = path or DEFAULT_LITELLM_CONFIG
+    with resolved.open(encoding="utf-8") as handle:
+        config = yaml.safe_load(handle)
+
+    references: dict[str, str] = {}
+    for entry in config.get("model_list") or []:
+        alias = str(entry.get("model_name", ""))
+        reference = str((entry.get("litellm_params") or {}).get("model", ""))
+        if alias and reference:
+            references[alias] = reference
+    return references
+
+
+def model_family(reference: str) -> str:
+    """The model FAMILY behind a reference — 'llama', 'qwen', 'nomic'.
+
+    D16 requires the judge to be a different FAMILY from the drafter, not merely
+    a different alias, because the failure being avoided is a model agreeing
+    with its own prose. Two aliases pointing at the same weights would satisfy
+    every check that compares alias names, and would make the quality numbers
+    self-graded while reading as though they were not.
+
+    Deliberately coarse. It answers "same family or not" and nothing else — the
+    provider prefix is dropped, any vendor path segment is dropped, and the
+    version, size and quantisation suffixes are dropped, so
+    `groq/llama-3.3-70b-versatile` and `ollama/llama3.2:3b` are both `llama`.
+    That is the correct answer for this question: they are the same family, and
+    a judge on one grading a drafter on the other is the thing being prevented.
+    """
+    tail = reference.split("/")[-1]
+    leading_alpha = re.match(r"[a-zA-Z]+", tail)
+    return leading_alpha.group(0).lower() if leading_alpha else tail.lower()
