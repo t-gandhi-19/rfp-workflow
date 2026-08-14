@@ -223,7 +223,14 @@ def config_dir() -> Path:
     return Path(__file__).resolve().parents[2] / "config"
 
 
-def _load_yaml(filename: str) -> dict[str, Any]:
+def load_config_yaml(filename: str) -> dict[str, Any]:
+    """Read one YAML file from the config tree as a mapping.
+
+    Public because `limits.yaml` is loaded the same way and by the same rules —
+    same directory, same `RFP_CONFIG_DIR` override, same "a config that is not a
+    mapping is a broken config" failure. A second copy of this in the controller
+    would be a second place for the override to stop working.
+    """
     path = config_dir() / filename
     if not path.is_file():
         raise FileNotFoundError(f"Config file not found: {path}")
@@ -237,7 +244,7 @@ def _load_yaml(filename: str) -> dict[str, Any]:
 @lru_cache(maxsize=1)
 def scoring_config() -> ScoringConfig:
     """Parsed, validated `scoring.yaml`. Cached after first read."""
-    return ScoringConfig.model_validate(_load_yaml("scoring.yaml"))
+    return ScoringConfig.model_validate(load_config_yaml("scoring.yaml"))
 
 
 def reload_config() -> None:

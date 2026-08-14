@@ -12,8 +12,13 @@ Import from this package root rather than the submodules:
 
 from __future__ import annotations
 
-from src.contracts.checks import ComplianceResult, EntityCheckResult, ForbiddenContentHit
-from src.contracts.drafting import CritiqueResult, DraftedAnswer
+from src.contracts.checks import (
+    ComplianceResult,
+    EntityCheckResult,
+    ForbiddenContentHit,
+    GuardrailVerdict,
+)
+from src.contracts.drafting import ConfidenceInputs, CritiqueResult, DraftedAnswer
 from src.contracts.enums import (
     DocumentFormat,
     EntityType,
@@ -44,6 +49,7 @@ __all__ = [
     "CandidateFlags",
     "CandidateSelection",
     "ComplianceResult",
+    "ConfidenceInputs",
     "CritiqueResult",
     "DocumentFormat",
     "DocumentSection",
@@ -56,6 +62,7 @@ __all__ = [
     "EvalScore",
     "ExtractedQuestion",
     "ForbiddenContentHit",
+    "GuardrailVerdict",
     "HaltReason",
     "Outcome",
     "QuestionStatus",

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from src.contracts.enums import EntityType
+from src.contracts.enums import EntityType, EscalationTrigger
 
 
 class ForbiddenContentHit(BaseModel):
@@ -37,6 +37,45 @@ class ComplianceResult(BaseModel):
     within_word_limit: bool
     forbidden_content_hits: list[ForbiddenContentHit] = Field(default_factory=list)
     template_slots_filled: bool
+
+
+class GuardrailVerdict(BaseModel):
+    """The deterministic post-processors' verdict on one draft.
+
+    Every guardrail in this system is code, and every one of them can only do
+    one of two things: let the answer through, or send it to a human. None of
+    them edits a draft, and none of them lowers a score — an answer that trips a
+    guardrail is not a worse answer, it is one a person has to look at.
+
+    `trigger` is required on a failure so the escalation names WHICH rule fired,
+    which is what the adversarial evals assert on: each planted trap has a
+    required trigger, and checking only that something escalated would pass a
+    system escalating for the wrong reason.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    passed: bool
+    trigger: EscalationTrigger | None = None
+    reason: str | None = None
+    #: The specific finding — the matched term, the unresolved entity, the
+    #: injection pattern NAME. Trap GQ-004 asserts the pattern is named.
+    detail: str | None = None
+
+    @model_validator(mode="after")
+    def _a_failure_says_which_rule_and_why(self) -> GuardrailVerdict:
+        if self.passed:
+            if self.trigger is not None or self.reason is not None:
+                raise ValueError(
+                    f"passed=True but a trigger/reason is set ({self.trigger}, {self.reason!r}); "
+                    "a guardrail that passed has nothing to escalate"
+                )
+            return self
+        if self.trigger is None:
+            raise ValueError("passed=False requires a trigger naming which guardrail fired")
+        if not (self.reason or "").strip():
+            raise ValueError("passed=False requires a non-empty reason")
+        return self
 
 
 class EntityCheckResult(BaseModel):

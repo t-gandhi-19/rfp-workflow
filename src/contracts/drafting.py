@@ -7,6 +7,37 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from src.contracts.thresholds import confidence_escalation_threshold
 
 
+class ConfidenceInputs(BaseModel):
+    """The measured terms `compute_confidence` combines.
+
+    Carried on the answer so the controller can RE-DERIVE confidence once the
+    critic's delta is known, rather than folding the delta into an already
+    clamped number. Those two are equal only while the clamp bounds happen to be
+    [0, 1] — they are, today, in `scoring.yaml` — and a config change would
+    silently turn an exact recomputation into an approximation with nothing to
+    catch it.
+
+    Rule 3: these are inputs to arithmetic the controller performs. The model
+    supplies the prose and the citations; it never supplies the number.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    #: `final_score` of the source the answer principally rests on.
+    primary_final_score: float = Field(ge=0.0, le=1.0)
+    claims_with_sources: int = Field(ge=0)
+    total_claims: int = Field(ge=0)
+
+    @model_validator(mode="after")
+    def _sourced_claims_do_not_exceed_total(self) -> ConfidenceInputs:
+        if self.claims_with_sources > self.total_claims:
+            raise ValueError(
+                f"{self.claims_with_sources} sourced claims exceeds "
+                f"{self.total_claims} total claims"
+            )
+        return self
+
+
 class DraftedAnswer(BaseModel):
     """One drafted answer with its citations and computed confidence.
 
@@ -29,6 +60,11 @@ class DraftedAnswer(BaseModel):
     needs_sme_review: bool
     unsupported_claims: list[str] = Field(default_factory=list)
     escalation_reason: str | None = None
+    #: None for an answer read back from Postgres — the table stores the
+    #: confidence, not the terms behind it. That is correct rather than lossy:
+    #: an answer being resumed is already terminal, so no critique is pending
+    #: and nothing remains to re-derive.
+    confidence_inputs: ConfidenceInputs | None = None
 
     @model_validator(mode="after")
     def _unescalated_answers_are_grounded(self) -> DraftedAnswer:
