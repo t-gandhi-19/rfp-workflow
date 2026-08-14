@@ -121,9 +121,32 @@ def require_write_api_and_keycloak() -> None:
     require_env(*WRITE_API_SECRETS)
 
 
+#: What the graph tests authenticate with. Checked alongside the port probe
+#: because a port is not an identity — see `require_neo4j`.
+NEO4J_SECRETS = ("NEO4J_PASSWORD",)
+
+
 def require_neo4j() -> None:
-    host, port = neo4j_bolt()
-    require(tcp_open("Neo4j Bolt", host, port))
+    """Bolt reachable AND the credentials to use it.
+
+    A RAW TCP PROBE CANNOT TELL WHOSE DATABASE THAT IS. On a machine running a
+    second project's stack — which is the normal case on the build host, hence
+    the 5xxxx port overrides in `.env` — port 7687 is open and belongs to
+    somebody else. A fresh clone with no `.env` then defaults to 7687, passes
+    the probe, and every graph test fails with
+
+        Neo.ClientError.Security.Unauthorized — missing key `credentials`
+
+    which is 38 red tests saying nothing about this repository. Amendment B
+    requires a fresh clone to be green-with-skips; requiring the password makes
+    the skip say "environment not loaded", which is both true and actionable.
+
+    This does not make the probe prove identity — nothing cheap does. It makes
+    the *unloaded environment* case, which is the reachable one, report itself
+    honestly instead of as a wall of authentication failures.
+    """
+    require(tcp_open("Neo4j Bolt", *neo4j_bolt()))
+    require_env(*NEO4J_SECRETS)
 
 
 #: Secrets the mcp-server integration tests authenticate with. `retriever-sa` is

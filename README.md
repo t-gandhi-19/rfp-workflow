@@ -478,6 +478,40 @@ write path, and those were candidate baselines for every real run — so running
 the test suite changed what the scoreboard said about the code. The baseline
 query now considers only commit-shaped keys.
 
+### A port is not an identity
+
+Amendment B requires a fresh clone to be **green with skips, never red**. It was
+not. Running the whole suite from a clean worktree with no `.env` produced 38
+errors:
+
+```
+neo4j.exceptions.AuthError: {code: Neo.ClientError.Security.Unauthorized}
+{message: Unsupported authentication token, missing key `credentials`}
+```
+
+`require_neo4j` probed a raw TCP port and nothing else. With no `.env` the port
+defaults to 7687 — and on the build host, which runs a second project's stack
+(hence the 5xxxx overrides in `.env`), **something is listening there.** The
+probe succeeded against a database belonging to somebody else, and 38 tests then
+failed for a reason that says nothing about this repository.
+
+The probe now requires `NEO4J_PASSWORD` alongside the port, exactly as
+`require_write_api_and_keycloak` already required its service-account secrets.
+That does not make a TCP probe prove identity — nothing cheap does. It makes the
+*unloaded environment* case, which is the reachable one, report itself as
+"environment not loaded" instead of as a wall of authentication failures.
+Clean-worktree full run afterwards: **1084 passed, 119 skipped.**
+
+This is the same shape as the `docker` shim two sections up, and as the CI
+embedder before it: a check that answered a question adjacent to the one being
+asked. "Is the port open" is not "is our database there", just as "is `docker` on
+the PATH" is not "can this shell reach the daemon".
+
+**Found only because amendment R's clean-worktree run was done in full.** The
+unit+security form of it — the form habitually run — is green on that same
+checkout, because the failure needs the integration suite and an unloaded
+environment at once.
+
 ### Working rules, earned and adopted
 
 Two rules generalised out of the amendment-S fallout at `b555ea6`. Both are

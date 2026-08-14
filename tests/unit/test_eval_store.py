@@ -20,7 +20,14 @@ from src.evals.contracts import (
     MetricDirection,
 )
 from src.evals.registry import all_placeholders
-from src.evals.store import Delta, deltas, git_sha, previous_scores, to_scores
+from src.evals.store import (
+    Delta,
+    EvalStoreError,
+    deltas,
+    git_sha,
+    previous_scores,
+    to_scores,
+)
 
 
 def category(key: str = "extraction", **overrides: object) -> CategoryResult:
@@ -110,6 +117,28 @@ class TestRowsCarryTheirProvenance:
         assert to_scores([failing], sha="abc", run_id="r1")[0].passed is False
 
 
+def git_can_answer() -> str | None:
+    """HEAD as git sees it from the test's cwd, or None if git cannot say.
+
+    Not a formality. `git rev-parse` genuinely fails in some environments this
+    suite must stay green in — a `git worktree` created by Windows git and run
+    under WSL has a `.git` file pointing at a `C:/…` gitdir the Linux git cannot
+    resolve, and a source tarball has no repository at all. Where git cannot
+    answer, "prefer git over the environment variable" is not a property that
+    exists to be tested.
+    """
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],  # noqa: S607
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+    except (OSError, subprocess.CalledProcessError):
+        return None
+    return result.stdout.strip()
+
+
 class TestTheShaComesFromGitInACheckout:
     """One env var name, two different questions.
 
@@ -119,23 +148,26 @@ class TestTheShaComesFromGitInACheckout:
     every local run to `local-dev` and making the SHA-keyed scoreboard useless.
     """
 
+    @pytest.fixture
+    def head(self) -> str:
+        resolved = git_can_answer()
+        if resolved is None:
+            pytest.skip("git cannot resolve HEAD here; the precedence has nothing to rank")
+        return resolved
+
     def test_the_container_variable_does_not_override_the_real_commit(
-        self, monkeypatch: pytest.MonkeyPatch
+        self, monkeypatch: pytest.MonkeyPatch, head: str
     ) -> None:
         monkeypatch.setenv("GIT_SHA", "local-dev")
         assert git_sha() != "local-dev"
 
-    def test_it_returns_the_head_this_checkout_is_on(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_it_returns_the_head_this_checkout_is_on(
+        self, monkeypatch: pytest.MonkeyPatch, head: str
+    ) -> None:
         monkeypatch.delenv("GIT_SHA", raising=False)
-        head = subprocess.run(
-            ["git", "rev-parse", "HEAD"],  # noqa: S607
-            capture_output=True,
-            text=True,
-            check=True,
-        ).stdout.strip()
         assert git_sha().startswith(head)
 
-    def test_a_dirty_worktree_is_marked(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_a_dirty_worktree_is_marked(self, monkeypatch: pytest.MonkeyPatch, head: str) -> None:
         """A number measured against uncommitted code is not a number about that
         commit, and a scoreboard attributing it to one is worse than a gap."""
         monkeypatch.delenv("GIT_SHA", raising=False)
@@ -146,6 +178,39 @@ class TestTheShaComesFromGitInACheckout:
             check=False,
         ).stdout.strip()
         assert git_sha().endswith("-dirty") is bool(dirty)
+
+
+class TestTheFallbackWhenGitCannotAnswer:
+    """The other branch, forced rather than waited for.
+
+    These run everywhere, including where git works, because the fallback is
+    reached in containers and source tarballs — environments this suite does not
+    execute in. Making the failure happen is the only way to cover it.
+    """
+
+    @pytest.fixture
+    def git_is_broken(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        def explode(*_args: object, **_kwargs: object) -> object:
+            raise OSError("git is not available here")
+
+        monkeypatch.setattr("src.evals.store.subprocess.run", explode)
+
+    def test_the_env_var_is_used_when_git_cannot_answer(
+        self, monkeypatch: pytest.MonkeyPatch, git_is_broken: None
+    ) -> None:
+        """Outside a checkout GIT_SHA is the only answer available — and there
+        it is the right one. The precedence is about which to prefer, not about
+        refusing the other."""
+        monkeypatch.setenv("GIT_SHA", "deadbeef")
+        assert git_sha() == "deadbeef"
+
+    def test_it_refuses_when_neither_is_available(
+        self, monkeypatch: pytest.MonkeyPatch, git_is_broken: None
+    ) -> None:
+        """Rows are keyed by SHA, so an unknown SHA is not something to guess at."""
+        monkeypatch.delenv("GIT_SHA", raising=False)
+        with pytest.raises(EvalStoreError, match="cannot determine the git SHA"):
+            git_sha()
 
 
 class TestAnUnreachableBaselineDegradesRatherThanCrashes:
