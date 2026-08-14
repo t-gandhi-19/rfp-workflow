@@ -657,9 +657,7 @@ def format_run(run: RetrievalRun) -> str:
     # first column is what qualifies a candidate, the second is what reorders
     # among qualifying ones, and the third is what the drafter actually sees.
     lines.append("  rank 1 — the drafter's primary source (relevance x preference = final):")
-    lines.append(
-        f"    {'no.':<5} {'answer':<10} {'relevance':>10} {'preference':>11} {'final':>9}"
-    )
+    lines.append(f"    {'no.':<5} {'answer':<10} {'relevance':>10} {'preference':>11} {'final':>9}")
     for outcome in run.outcomes:
         if not outcome.candidates:
             lines.append(f"    {outcome.number:<5} {'(none)':<10}")
