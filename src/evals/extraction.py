@@ -290,14 +290,14 @@ def run_extraction_eval(
     # The injection check runs over the EXTRACTOR'S questions, not the key's:
     # the sanitizer's input in production is extracted text, and a carrier the
     # extractor mangled must fail here rather than pass on the key's clean copy.
-    for question in pdf_questions:
-        result = sanitize_question(question.id, question.text)
+    for extracted_question in pdf_questions:
+        result = sanitize_question(extracted_question.id, extracted_question.text)
         patterns = tuple(sorted({hit.pattern_name for hit in result.hits}))
-        if question.printed_number == INJECTION_QUESTION_NUMBER:
+        if extracted_question.printed_number == INJECTION_QUESTION_NUMBER:
             run.injection_patterns = patterns
         elif result.injection_detected:
             run.injection_false_positives.append(
-                f"{question.printed_number} flagged {', '.join(patterns)}"
+                f"{extracted_question.printed_number} flagged {', '.join(patterns)}"
             )
 
     return run
@@ -318,14 +318,15 @@ def _violations(run: ExtractionRun) -> list[Violation]:
                 ),
             )
         )
-    for question in run.spurious:
+    for extracted_question in run.spurious:
         violations.append(
             Violation(
                 rule="extraction_precision",
-                question_number=question.printed_number,
+                question_number=extracted_question.printed_number,
                 detail=(
                     f"produced by the extractor, absent from the manual key: "
-                    f"{question.normalized_text[:120]!r}. FINDING — the key is not edited."
+                    f"{extracted_question.normalized_text[:120]!r}. "
+                    "FINDING — the key is not edited."
                 ),
             )
         )

@@ -47,6 +47,21 @@ def score(sha: str, run_id: str, metric: str, value: float) -> EvalScore:
     )
 
 
+#: `previous_scores` absorbs every failure into `(None, {})` by design — a
+#: missing baseline must not fail a run. That makes a bare `assert previous_sha
+#: is not None` an assertion with the cause stripped out of it, so the cause goes
+#: in the message. It has already been two different things: `postgresql+asyncpg`
+#: (a driver this project does not ship) and a POSTGRES_HOST naming the compose
+#: service from a runner outside the network.
+UNREACHABLE_HINT = (
+    "the read path returned no baseline. The stack is up by definition here, so this "
+    "is the direct Postgres read failing, not an empty table: check POSTGRES_HOST/"
+    "POSTGRES_PORT point at the PUBLISHED port rather than the compose service name, "
+    "that APP_READER_PASSWORD is loaded, and that app_reader is granted SELECT on "
+    "eval_results. The WARNING logged by rfp.evals.store names the actual exception."
+)
+
+
 def fake_sha(marker: str = "e7") -> str:
     """A key with a REAL COMMIT'S SHAPE, so the baseline query will consider it.
 
@@ -69,8 +84,8 @@ class TestTheRoundTrip:
         # Read from the perspective of a LATER sha, which is what the harness
         # does: "what did the previous commit measure?"
         previous_sha, scores = await previous_scores(current_sha=fake_sha("ff"))
-        assert previous_sha is not None
-        assert scores, "the read path returned nothing; check app_reader's grant on eval_results"
+        assert previous_sha is not None, UNREACHABLE_HINT
+        assert scores, UNREACHABLE_HINT
 
     async def test_the_current_sha_is_excluded_from_its_own_baseline(self) -> None:
         """A run must not difference against itself and report zero movement."""
@@ -119,7 +134,7 @@ class TestTestRowsCannotBecomeABaseline:
         await persist([score(sha, run_id, "extraction.recall", 1.0)])
 
         previous_sha, _ = await previous_scores(current_sha=fake_sha("ff"))
-        assert previous_sha is not None
+        assert previous_sha is not None, UNREACHABLE_HINT
 
 
 class TestDeltasAgainstRealRows:

@@ -230,6 +230,14 @@ jobs:
           export WRITE_API_BASE=http://localhost:${WRITE_API_PORT:-8001}
           export MCP_BASE=http://localhost:${MCP_PORT_HOST:-8002}
           export NEO4J_URI=bolt://localhost:${NEO4J_BOLT_PORT_HOST:-7687}
+          # Postgres over the PUBLISHED port, for the same reason as the line
+          # above: .env's POSTGRES_HOST is the compose service name, which
+          # resolves inside the network and nowhere else. New in Phase 3 because
+          # the eval harness reads the previous SHA's rows DIRECTLY — every
+          # other integration test reaches Postgres only through write-api, so
+          # until now nothing here needed the host view of it.
+          export POSTGRES_HOST=localhost
+          export POSTGRES_PORT=${POSTGRES_PORT_HOST:-5432}
           # DECLARED, not worked around. The graph these tests run against was
           # ingested with the stand-in embedder two steps above, so the vectors
           # in it ARE stand-in vectors — this makes the environment say what was

@@ -54,7 +54,7 @@ def category(key: str = "extraction", **overrides: object) -> CategoryResult:
         "metrics": metrics,
     }
     base.update(overrides)
-    return CategoryResult(**base)  # type: ignore[arg-type]
+    return CategoryResult(**base)
 
 
 class TestOnlyGatedMetricsBecomeRows:
