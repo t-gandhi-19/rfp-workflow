@@ -148,6 +148,16 @@ async def run(
     # to make visible.
     configure_app_logging()
 
+    # THE SHA IS CAPTURED BEFORE ANY MEASUREMENT, not after.
+    #
+    # A rerank-ON run takes ~35 minutes, and reading HEAD at the end lets a
+    # commit landing during it relabel the numbers: the code that produced them
+    # was loaded at process start, so a SHA read afterwards can name a commit
+    # whose code never ran. It also loses the `-dirty` marking in the opposite
+    # direction — start dirty, commit mid-run, and the numbers are attributed to
+    # a clean tree they were not measured against.
+    sha = git_sha()
+
     if fake_embeddings_enabled():
         sys.stderr.write(
             "WARNING: RFP_FAKE_EMBEDDINGS=1 — these vectors carry no semantics. "
@@ -188,7 +198,6 @@ async def run(
 
     results.extend(all_placeholders())
 
-    sha = git_sha()
     run_id = f"evals-{uuid.uuid4().hex[:12]}"
     scores = to_scores(results, sha=sha, run_id=run_id)
 
