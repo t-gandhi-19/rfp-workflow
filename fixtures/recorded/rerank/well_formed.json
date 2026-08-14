@@ -1,0 +1,30 @@
+{
+  "candidate_count": 8,
+  "elapsed_seconds": 60.4,
+  "model_alias": "rerank-model",
+  "model_tag": "llama3.1:8b",
+  "observed": "All eight candidates scored. The contrast case: the malformed fixture is only meaningful if a normal response still reranks normally.",
+  "prompt_name": "rerank",
+  "prompt_version": 1,
+  "raw_content": "{\"scores\": [{\"index\": 0, \"score\": 0.0}, {\"index\": 1, \"score\": 0.0}, {\"index\": 2, \"score\": 0.9}, {\"index\": 3, \"score\": 0.0}, {\"index\": 4, \"score\": 0.0}, {\"index\": 5, \"score\": 0.0}, {\"index\": 6, \"score\": 0.0}, {\"index\": 7, \"score\": 0.0}]}",
+  "recorded_on": "2026-08-10",
+  "score_count": 8,
+  "scored_indices": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7
+  ],
+  "temperature": 0,
+  "usage": {
+    "completion_tokens": 117,
+    "completion_tokens_details": null,
+    "prompt_tokens": 461,
+    "prompt_tokens_details": null,
+    "total_tokens": 578
+  }
+}

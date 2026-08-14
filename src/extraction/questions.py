@@ -96,6 +96,10 @@ def _flush(
         word_limit=word_limit,
         mandatory=mandatory,
         order=order,
+        # Kept rather than discarded. Normalisation strips it from the text, and
+        # it used to survive only as a prefix a caller had to re-parse — which
+        # made every consumer reimplement the same regex.
+        printed_number=number_match.group("number"),
     )
 
 

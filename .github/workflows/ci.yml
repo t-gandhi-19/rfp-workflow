@@ -49,7 +49,7 @@ jobs:
       - name: ruff format
         run: uv run ruff format --check .
       - name: mypy
-        run: uv run mypy src tests
+        run: uv run mypy src tests scripts
 
   # ---------------------------------------------------------------------------
   # Unit and security suites. No network, no models, no database.
@@ -103,28 +103,113 @@ jobs:
           # parseable if it is ever added to the service list here.
           sed -i 's|^GROQ_API_KEY=$|GROQ_API_KEY=gsk-ci-placeholder|' .env
 
-      - name: Start postgres, keycloak, neo4j, write-api
+      # mcp-server joins the list in Phase 3. It is started HERE, before the
+      # schema and ingest steps, deliberately: it holds no schema and reads
+      # nothing at boot, so a container that cannot come up against an empty
+      # graph is a container with a startup dependency it should not have.
+      - name: Start postgres, keycloak, neo4j, write-api, mcp-server
         run: |
           set -a && source .env && set +a
           docker compose --profile infra --profile app up -d --wait \
-            postgres keycloak neo4j write-api
+            postgres keycloak neo4j write-api mcp-server
 
       - name: Show service status
         if: always()
         run: docker compose --profile infra --profile app ps
 
-      - name: Apply graph schema (twice — it must be idempotent)
+      # THROUGH THE MAKE TARGET, not `python -m scripts.apply_schema`.
+      #
+      # The recipe is a layer nothing used to execute. `make preflight` shipped
+      # without HOST_NEO4J and dialled the compose service name from the host,
+      # and neither the unit suite nor this job noticed — because this job
+      # invoked the modules directly with its own NEO4J_URI export, supplying by
+      # hand exactly what the broken recipe failed to supply. Running the target
+      # means the wiring is exercised rather than bypassed.
+      #
+      # No NEO4J_URI export here on purpose: HOST_NEO4J is what must provide it.
+      # Re-adding one would restore the blind spot.
+      - name: Apply graph schema through its make target (twice — it must be idempotent)
         run: |
           set -a && source .env && set +a
-          export NEO4J_URI=bolt://localhost:${NEO4J_BOLT_PORT_HOST:-7687}
-          uv run python -m scripts.apply_schema
-          uv run python -m scripts.apply_schema
+          make apply-schema
+          make apply-schema
 
-      - name: Ingest fixtures with the deterministic stand-in embedder
+      # CI COMMISSIONS ITS OWN GUARD BASELINES (amendment N).
+      #
+      # The baselines in config/scoring.yaml were measured against
+      # nomic-embed-text on real vectors. They describe that model, so CI must
+      # neither be judged against them nor be able to move them. `calibrate`
+      # refuses the second outright: commissioning under the stand-in is allowed
+      # only when RFP_CONFIG_DIR points somewhere other than the committed
+      # config, so nothing that ships can change here.
+      #
+      # Commissioned once per run, from CI's own vectors, and the enforcing
+      # calibration below is then judged against those. Deterministic by
+      # construction — the stand-in is a pure function of the fixtures — so this
+      # is a fixed comparison, not a ratchet that resets itself.
+      # THROUGH THE MAKE TARGETS: apply-schema, ingest and calibrate all run
+      # from their real recipes. `-o preflight-pre-ingest` marks only that
+      # prerequisite old — its checks need Ollama, which CI never runs
+      # (CLAUDE.md rule 26). Everything else in the chain executes.
+      #
+      # ORDER MATTERS SINCE AMENDMENT S. Commissioning used to run before this
+      # step; it cannot any more, because calibration now compares its own
+      # similarity against the VECTOR INDEX, and before ingest the index is
+      # empty. So the graph is populated first, judged against the shipped
+      # baselines (which the stand-in clears comfortably — its separation is
+      # ~0.93 against a body_min of 0.1394), and CI's own baselines are
+      # commissioned and enforced immediately afterwards.
+      - name: Ingest and calibrate through the make targets
+        run: |
+          set -a && source .env && set +a
+          export RFP_FAKE_EMBEDDINGS=1
+          export RFP_CONFIG_DIR="$RUNNER_TEMP/ci-config"
+          cp -r config "$RFP_CONFIG_DIR"
+          make -o preflight-pre-ingest ingest
+
+      # CI COMMISSIONS ITS OWN GUARD BASELINES (amendment N).
+      #
+      # The baselines in config/scoring.yaml were measured against
+      # nomic-embed-text on real vectors. They describe that model, so CI must
+      # neither be judged against them nor be able to move them. `calibrate`
+      # refuses the second outright: commissioning under the stand-in is allowed
+      # only when RFP_CONFIG_DIR points somewhere other than the committed
+      # config, so nothing that ships can change here.
+      #
+      # Commissioned once per run, from CI's own vectors. Deterministic by
+      # construction — the stand-in is a pure function of the fixtures — so this
+      # is a fixed comparison, not a ratchet that resets itself.
+      - name: Commission CI's own calibration baselines into a scratch config
+        run: |
+          set -a && source .env && set +a
+          export RFP_FAKE_EMBEDDINGS=1
+          export RFP_CONFIG_DIR="$RUNNER_TEMP/ci-config"
+          export NEO4J_URI=bolt://localhost:${NEO4J_BOLT_PORT_HOST:-7687}
+          uv run python -m scripts.calibrate --commission --dry-run --skip-persist
+
+      # The run of record: BOTH TIERS ENFORCING against the baselines CI just
+      # measured on its own vectors, with no exemption — tier 1 on the median
+      # gap, tier 2 landing all twenty golden questions on the derived floor,
+      # plus the amendment-S units agreement between calibration and the index.
+      # Under v2 this was impossible: the stand-in's separation was negative and
+      # `make calibrate` refused, so the guards were the one thing CI could not
+      # exercise.
+      - name: Calibrate enforcing against CI's own baselines
+        run: |
+          set -a && source .env && set +a
+          export RFP_FAKE_EMBEDDINGS=1
+          export RFP_CONFIG_DIR="$RUNNER_TEMP/ci-config"
+          make calibrate
+
+      - name: Ingest is idempotent
         run: |
           set -a && source .env && set +a
           export NEO4J_URI=bolt://localhost:${NEO4J_BOLT_PORT_HOST:-7687}
           export RFP_FAKE_EMBEDDINGS=1
+          # Invoked directly rather than through `make ingest`: this compares two
+          # runs' JSON on stdout, and the make target also runs calibrate, whose
+          # report is not JSON. The recipe is exercised by the step above; what
+          # this adds is the comparison.
           uv run python -m scripts.ingest > /tmp/ingest-first.json
           uv run python -m scripts.ingest > /tmp/ingest-second.json
           python - <<'PY'
@@ -133,6 +218,7 @@ jobs:
           second = json.load(open("/tmp/ingest-second.json"))
           for key in ("nodes", "relationships", "by_label", "by_relationship"):
               assert first[key] == second[key], f"ingest is not idempotent: {key} changed"
+          assert first["nodes"] > 0, "the graph is empty; the ingest above did not land"
           assert second["questions_embedded"] == 0, "re-ingest re-embedded existing questions"
           print(f"ingest idempotent: {first['nodes']} nodes, {first['relationships']} relationships")
           PY
@@ -142,8 +228,66 @@ jobs:
           set -a && source .env && set +a
           export KEYCLOAK_BASE=http://localhost:${KEYCLOAK_PORT_HOST:-8080}
           export WRITE_API_BASE=http://localhost:${WRITE_API_PORT:-8001}
+          export MCP_BASE=http://localhost:${MCP_PORT_HOST:-8002}
           export NEO4J_URI=bolt://localhost:${NEO4J_BOLT_PORT_HOST:-7687}
+          # Postgres over the PUBLISHED port, for the same reason as the line
+          # above: .env's POSTGRES_HOST is the compose service name, which
+          # resolves inside the network and nowhere else. New in Phase 3 because
+          # the eval harness reads the previous SHA's rows DIRECTLY — every
+          # other integration test reaches Postgres only through write-api, so
+          # until now nothing here needed the host view of it.
+          export POSTGRES_HOST=localhost
+          export POSTGRES_PORT=${POSTGRES_PORT_HOST:-5432}
+          # DECLARED, not worked around. The graph these tests run against was
+          # ingested with the stand-in embedder two steps above, so the vectors
+          # in it ARE stand-in vectors — this makes the environment say what was
+          # already true. Without it, any test that asks how to embed gets the
+          # real answer and dials a LiteLLM this job never starts.
+          #
+          # The older tests hardcode `fake_embedding(...)`, which hid the gap:
+          # they could not have noticed the environment was not declaring it.
+          export RFP_FAKE_EMBEDDINGS=1
           uv run pytest tests/integration -q -m integration
+
+      # THE EVAL HARNESS, run through its real entry point.
+      #
+      # --categories extraction, and the reason is not convenience. This job
+      # ingests with the stand-in embedder, so its vectors carry no semantics:
+      # a Recall@5 or a rank-1 accuracy measured on them is a number about
+      # nothing, and gating a build on it would be gating on noise. The
+      # retrieval numbers of record come from a local run against
+      # nomic-embed-text in the shipped rerank-ON configuration.
+      #
+      # Extraction, by contrast, is FULLY REAL here: it parses the committed PDF
+      # and DOCX and compares against the externally-authored manual key, with no
+      # model and no database involved. Its recall, precision, field accuracy,
+      # parity and injection numbers in CI are the same numbers as locally.
+      #
+      # --no-persist: this job's Postgres is torn down with the runner, so a
+      # write would produce a scoreboard row nothing can ever compare against.
+      # The eval-writer path itself is covered by the integration suite.
+      #
+      # OPEN: running retrieval here needs a recorded rerank set keyed by
+      # question id, and recordings captured locally would not match this job's
+      # candidate counts. Rather than fabricate fixtures, the category is
+      # deselected and the report says DESELECTED rather than NOT_IMPLEMENTED.
+      - name: Eval harness (extraction is real here; retrieval is not)
+        run: |
+          set -a && source .env && set +a
+          export RFP_FAKE_EMBEDDINGS=1
+          uv run python -m scripts.evals \
+            --categories extraction --no-persist --out "$RUNNER_TEMP/evals.html"
+          test -s "$RUNNER_TEMP/evals.html" || { echo "no report was written"; exit 1; }
+          grep -q "NOT IMPLEMENTED" "$RUNNER_TEMP/evals.html" \
+            || { echo "placeholders are missing from the report"; exit 1; }
+
+      - name: Upload the eval report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: eval-report
+          path: ${{ runner.temp }}/evals.html
+          if-no-files-found: warn
 
       - name: Confirm the write actually landed in Postgres
         run: |

@@ -22,6 +22,7 @@
     "question_id": "HQ-0001",
     "question_type": "compliance",
     "superseded_by": null,
+    "topic_family": "access-control-review",
     "topic_key": "access-control-review",
     "word_count": 221
   },
@@ -48,6 +49,7 @@
     "question_id": "HQ-0002",
     "question_type": "technical",
     "superseded_by": null,
+    "topic_family": "application-remediation",
     "topic_key": "application-remediation",
     "word_count": 204
   },
@@ -74,6 +76,7 @@
     "question_id": "HQ-0003",
     "question_type": "compliance",
     "superseded_by": null,
+    "topic_family": "audit-rights",
     "topic_key": "audit-rights",
     "word_count": 230
   },
@@ -99,6 +102,7 @@
     "question_id": "HQ-0004",
     "question_type": "commercial",
     "superseded_by": null,
+    "topic_family": "change-control",
     "topic_key": "change-control",
     "word_count": 221
   },
@@ -124,6 +128,7 @@
     "question_id": "HQ-0005",
     "question_type": "technical",
     "superseded_by": "ANS-0006",
+    "topic_family": "cutover-rollback",
     "topic_key": "cutover-rollback-v1",
     "word_count": 208
   },
@@ -151,6 +156,7 @@
     "question_id": "HQ-0006",
     "question_type": "technical",
     "superseded_by": null,
+    "topic_family": "cutover-rollback",
     "topic_key": "cutover-rollback-v2",
     "word_count": 233
   },
@@ -177,6 +183,7 @@
     "question_id": "HQ-0007",
     "question_type": "technical",
     "superseded_by": null,
+    "topic_family": "data-centre-exit",
     "topic_key": "data-centre-exit",
     "word_count": 219
   },
@@ -203,6 +210,7 @@
     "question_id": "HQ-0008",
     "question_type": "compliance",
     "superseded_by": null,
+    "topic_family": "data-residency",
     "topic_key": "data-residency",
     "word_count": 214
   },
@@ -228,6 +236,7 @@
     "question_id": "HQ-0009",
     "question_type": "technical",
     "superseded_by": "ANS-0010",
+    "topic_family": "database-migration",
     "topic_key": "database-migration-v1",
     "word_count": 214
   },
@@ -255,6 +264,7 @@
     "question_id": "HQ-0010",
     "question_type": "technical",
     "superseded_by": null,
+    "topic_family": "database-migration",
     "topic_key": "database-migration-v2",
     "word_count": 244
   },
@@ -283,6 +293,7 @@
     "question_id": "HQ-0011",
     "question_type": "company_info",
     "superseded_by": null,
+    "topic_family": "delivery-centres",
     "topic_key": "delivery-centres",
     "word_count": 203
   },
@@ -309,6 +320,7 @@
     "question_id": "HQ-0012",
     "question_type": "technical",
     "superseded_by": null,
+    "topic_family": "dependency-discovery",
     "topic_key": "dependency-discovery",
     "word_count": 240
   },
@@ -335,6 +347,7 @@
     "question_id": "HQ-0013",
     "question_type": "technical",
     "superseded_by": null,
+    "topic_family": "disaster-recovery",
     "topic_key": "disaster-recovery",
     "word_count": 227
   },
@@ -361,6 +374,7 @@
     "question_id": "HQ-0014",
     "question_type": "technical",
     "superseded_by": null,
+    "topic_family": "encryption-key-management",
     "topic_key": "encryption-key-management",
     "word_count": 209
   },
@@ -386,6 +400,7 @@
     "question_id": "HQ-0015",
     "question_type": "commercial",
     "superseded_by": null,
+    "topic_family": "engagement-model",
     "topic_key": "engagement-model",
     "word_count": 232
   },
@@ -413,6 +428,7 @@
     "question_id": "HQ-0016",
     "question_type": "commercial",
     "superseded_by": null,
+    "topic_family": "finops-reporting",
     "topic_key": "finops-reporting",
     "word_count": 224
   },
@@ -439,6 +455,7 @@
     "question_id": "HQ-0017",
     "question_type": "compliance",
     "superseded_by": null,
+    "topic_family": "gdpr-handling",
     "topic_key": "gdpr-handling",
     "word_count": 210
   },
@@ -464,6 +481,7 @@
     "question_id": "HQ-0018",
     "question_type": "commercial",
     "superseded_by": null,
+    "topic_family": "governance-model",
     "topic_key": "governance-model",
     "word_count": 229
   },
@@ -490,6 +508,7 @@
     "question_id": "HQ-0019",
     "question_type": "technical",
     "superseded_by": null,
+    "topic_family": "identity-integration",
     "topic_key": "identity-integration",
     "word_count": 220
   },
@@ -516,6 +535,7 @@
     "question_id": "HQ-0020",
     "question_type": "compliance",
     "superseded_by": null,
+    "topic_family": "incident-notification",
     "topic_key": "incident-notification",
     "word_count": 203
   },
@@ -541,6 +561,7 @@
     "question_id": "HQ-0021",
     "question_type": "compliance",
     "superseded_by": "ANS-0022",
+    "topic_family": "iso-soc-scope",
     "topic_key": "iso-soc-scope-v1",
     "word_count": 201
   },
@@ -570,6 +591,7 @@
     "question_id": "HQ-0022",
     "question_type": "compliance",
     "superseded_by": null,
+    "topic_family": "iso-soc-scope",
     "topic_key": "iso-soc-scope-v2",
     "word_count": 236
   },
@@ -596,6 +618,7 @@
     "question_id": "HQ-0023",
     "question_type": "company_info",
     "superseded_by": null,
+    "topic_family": "knowledge-transfer",
     "topic_key": "knowledge-transfer",
     "word_count": 199
   },
@@ -621,6 +644,7 @@
     "question_id": "HQ-0024",
     "question_type": "technical",
     "superseded_by": "ANS-0025",
+    "topic_family": "landing-zone",
     "topic_key": "landing-zone-v1",
     "word_count": 221
   },
@@ -648,6 +672,7 @@
     "question_id": "HQ-0025",
     "question_type": "technical",
     "superseded_by": null,
+    "topic_family": "landing-zone",
     "topic_key": "landing-zone-v2",
     "word_count": 236
   },
@@ -675,6 +700,7 @@
     "question_id": "HQ-0026",
     "question_type": "technical",
     "superseded_by": null,
+    "topic_family": "migration-tooling-selection",
     "topic_key": "migration-tooling-selection",
     "word_count": 213
   },
@@ -700,6 +726,7 @@
     "question_id": "HQ-0027",
     "question_type": "technical",
     "superseded_by": null,
+    "topic_family": "network-connectivity",
     "topic_key": "network-connectivity",
     "word_count": 222
   },
@@ -726,6 +753,7 @@
     "question_id": "HQ-0028",
     "question_type": "technical",
     "superseded_by": null,
+    "topic_family": "observability",
     "topic_key": "observability",
     "word_count": 222
   },
@@ -752,6 +780,7 @@
     "question_id": "HQ-0029",
     "question_type": "company_info",
     "superseded_by": null,
+    "topic_family": "partnerships",
     "topic_key": "partnerships",
     "word_count": 193
   },
@@ -778,6 +807,7 @@
     "question_id": "HQ-0030",
     "question_type": "technical",
     "superseded_by": null,
+    "topic_family": "performance-validation",
     "topic_key": "performance-validation",
     "word_count": 217
   },
@@ -803,6 +833,7 @@
     "question_id": "HQ-0031",
     "question_type": "company_info",
     "superseded_by": null,
+    "topic_family": "quality-system",
     "topic_key": "quality-system",
     "word_count": 215
   },
@@ -828,6 +859,7 @@
     "question_id": "HQ-0032",
     "question_type": "commercial",
     "superseded_by": null,
+    "topic_family": "raci-model",
     "topic_key": "raci-model",
     "word_count": 219
   },
@@ -852,6 +884,7 @@
     "question_id": "HQ-0033",
     "question_type": "company_info",
     "superseded_by": null,
+    "topic_family": "reference-experience",
     "topic_key": "reference-experience",
     "word_count": 225
   },
@@ -876,6 +909,7 @@
     "question_id": "HQ-0034",
     "question_type": "company_info",
     "superseded_by": null,
+    "topic_family": "retention-continuity",
     "topic_key": "retention-continuity",
     "word_count": 217
   },
@@ -903,6 +937,7 @@
     "question_id": "HQ-0035",
     "question_type": "technical",
     "superseded_by": null,
+    "topic_family": "sixr-strategy",
     "topic_key": "sixr-strategy",
     "word_count": 242
   },
@@ -930,6 +965,7 @@
     "question_id": "HQ-0036",
     "question_type": "company_info",
     "superseded_by": null,
+    "topic_family": "subcontractor-model",
     "topic_key": "subcontractor-model",
     "word_count": 217
   },
@@ -956,6 +992,7 @@
     "question_id": "HQ-0037",
     "question_type": "company_info",
     "superseded_by": null,
+    "topic_family": "team-model",
     "topic_key": "team-model",
     "word_count": 228
   },
@@ -982,6 +1019,7 @@
     "question_id": "HQ-0038",
     "question_type": "compliance",
     "superseded_by": null,
+    "topic_family": "vulnerability-management",
     "topic_key": "vulnerability-management",
     "word_count": 193
   },
@@ -1007,6 +1045,7 @@
     "question_id": "HQ-0039",
     "question_type": "commercial",
     "superseded_by": null,
+    "topic_family": "warranty-process",
     "topic_key": "warranty-process",
     "word_count": 226
   },
@@ -1033,6 +1072,7 @@
     "question_id": "HQ-0040",
     "question_type": "technical",
     "superseded_by": null,
+    "topic_family": "wave-planning",
     "topic_key": "wave-planning",
     "word_count": 223
   }

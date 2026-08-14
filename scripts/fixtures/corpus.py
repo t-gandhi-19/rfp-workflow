@@ -31,6 +31,21 @@ class Topic(NamedTuple):
     locations: tuple[str, ...] = ()
     #: Key of the topic that supersedes this one, if any.
     superseded_by: str | None = None
+    #: Which SUBJECT this topic is about, as opposed to which record it is.
+    #:
+    #: `key` is an identity — it is unique, and the golden RFP source joins to a
+    #: corpus answer through it. `family` is a grouping, and the two are not the
+    #: same thing: `landing-zone-v1` and `landing-zone-v2` are two records of one
+    #: subject. Calibration needs the grouping, because "genuinely the same
+    #: question" is a statement about subject, not about row identity.
+    #:
+    #: Defaults to `key`, which is correct for the 32 topics that appear once.
+    family: str | None = None
+
+
+def family_of(topic: Topic) -> str:
+    """The subject a topic belongs to. Its own key unless it is a version."""
+    return topic.family or topic.key
 
 
 TOPICS: tuple[Topic, ...] = (
@@ -80,6 +95,7 @@ TOPICS: tuple[Topic, ...] = (
         products=(),
         vendors=("Silverbrook Security Labs",),
         superseded_by="landing-zone-v2",
+        family="landing-zone",
     ),
     Topic(
         "landing-zone-v2",
@@ -95,6 +111,7 @@ TOPICS: tuple[Topic, ...] = (
         "before handover, and CloudNova Partners operates it thereafter.",
         products=("SecureLand",),
         vendors=("Silverbrook Security Labs", "CloudNova Partners"),
+        family="landing-zone",
     ),
     Topic(
         "cutover-rollback-v1",
@@ -109,6 +126,7 @@ TOPICS: tuple[Topic, ...] = (
         products=(),
         vendors=("Meridian Systems Integration",),
         superseded_by="cutover-rollback-v2",
+        family="cutover-rollback",
     ),
     Topic(
         "cutover-rollback-v2",
@@ -124,6 +142,7 @@ TOPICS: tuple[Topic, ...] = (
         "than theoretical. Meridian Systems Integration staffs the application-side checks.",
         products=("ShiftRunner", "TestHarbor"),
         vendors=("Meridian Systems Integration",),
+        family="cutover-rollback",
     ),
     Topic(
         "database-migration-v1",
@@ -138,6 +157,7 @@ TOPICS: tuple[Topic, ...] = (
         products=(),
         vendors=("Apex Data Movers",),
         superseded_by="database-migration-v2",
+        family="database-migration",
     ),
     Topic(
         "database-migration-v2",
@@ -153,6 +173,7 @@ TOPICS: tuple[Topic, ...] = (
         "readable for a reconciliation period after cutover.",
         products=("DataFerry", "TestHarbor"),
         vendors=("Apex Data Movers",),
+        family="database-migration",
     ),
     Topic(
         "network-connectivity",
@@ -302,6 +323,7 @@ TOPICS: tuple[Topic, ...] = (
         "statements are provided on request.",
         certifications=("ISO 27001", "ISO 9001"),
         superseded_by="iso-soc-scope-v2",
+        family="iso-soc-scope",
     ),
     Topic(
         "iso-soc-scope-v2",
@@ -323,6 +345,7 @@ TOPICS: tuple[Topic, ...] = (
             "AWS Migration Competency",
             "Azure Expert MSP",
         ),
+        family="iso-soc-scope",
     ),
     Topic(
         "data-residency",
@@ -555,6 +578,11 @@ TOPICS: tuple[Topic, ...] = (
         "responsible for that task and we remain accountable for the outcome.",
         vendors=("Meridian Systems Integration",),
     ),
+    # QA-0039. This pair exists to exercise the legal-adjacent path end to end:
+    # the question IS retrieved and drafted normally, and the resulting draft is
+    # then ALWAYS escalated by the forbidden-term guardrail because "warranty" is
+    # in the legal term list. Contrast with pricing, which is never drafted at
+    # all. If this pair is ever removed, that path loses its only exercise.
     Topic(
         "warranty-process",
         "commercial",
@@ -656,3 +684,265 @@ RISK_SENTENCES: tuple[str, ...] = (
     "its prerequisites are genuinely complete. Readiness is evidenced against written criteria, "
     "and a wave that is not ready moves rather than proceeding on optimism.",
 )
+
+
+#: Two alternate phrasings per topic FAMILY — the same question as a different
+#: customer's RFP would ask it.
+#:
+#: These exist because calibration needs to measure what "genuinely the same
+#: question" scores, and until they were added the corpus could not answer that.
+#: Its only same-subject pairs were the four supersession chains, whose question
+#: text is byte-identical, so the anchor would have been measured on exact
+#: duplicates — the easiest possible case. A floor derived from that lands above
+#: real paraphrase matches and rejects them.
+#:
+#: Keyed by FAMILY, not by key: `landing-zone-v1` and `landing-zone-v2` ask the
+#: same question, so they share one set rather than getting two.
+#:
+#: THEY KEEP THE DOMAIN VOCABULARY, and that is a correction rather than
+#: laziness. The first version of this block deliberately avoided the subject
+#: noun — asking about "the target cloud foundation" instead of "the landing
+#: zone" — and 51 of the 72 shared no content word at all with their original.
+#: That is not how a real RFP rephrases a question; it is an adversarial lower
+#: bound. Measured against it, `same_topic_p05` would sit far below what a
+#: genuine match actually scores, dragging the derived floor down and making it
+#: too permissive — the mirror image of the duplicate-anchor failure.
+#:
+#: So: same subject nouns, different verbs, framing and emphasis. Recognisably
+#: the same question, demonstrably not the same sentence.
+PARAPHRASES: dict[str, tuple[str, str, str]] = {
+    "access-control-review": (
+        "Set out the controls over privileged access and the cycle on which it is reviewed.",
+        "Who approves privileged access to our systems, and what record is kept when it is "
+        "granted or revoked?",
+        "How is privileged access to customer environments requested, approved and "
+        "periodically recertified?",
+    ),
+    "application-remediation": (
+        "What is your approach for applications that need remediation before they can be rehosted?",
+        "Where an application cannot move unchanged, how is the necessary remediation scoped "
+        "and delivered?",
+        "How much application remediation do you expect across an estate like ours, and who "
+        "carries out the changes?",
+    ),
+    "audit-rights": (
+        "What audit rights would we hold under contract, and what evidence would you make "
+        "available?",
+        "Set out the evidence you supply to support a customer audit and the access rights "
+        "that accompany it.",
+        "How often may we exercise our audit rights, and what evidence pack is produced for "
+        "each audit?",
+    ),
+    "change-control": (
+        "What is your change control process when programme scope moves?",
+        "How are changes to agreed scope raised, assessed and approved during delivery?",
+        "Describe the change control board and how a scope variation reaches a decision.",
+    ),
+    "cutover-rollback": (
+        "How is each cutover planned, and what rollback options remain once it has begun?",
+        "Set out cutover sequencing and the rollback position you hold at each go/no-go gate.",
+        "What does a cutover runbook contain, and at what point does rollback stop being "
+        "available?",
+    ),
+    "data-centre-exit": (
+        "How is the source data centre decommissioned once its workloads have moved?",
+        "What is your data centre exit process, including decommissioning of the remaining estate?",
+        "Who owns data centre decommissioning once migration completes, and what evidence of "
+        "asset disposal is provided?",
+    ),
+    "data-residency": (
+        "What controls guarantee that data residency obligations are met and stay met?",
+        "How is data residency enforced, and how would you evidence compliance to a regulator?",
+        "Where will our data physically reside, and what technical controls prevent it leaving "
+        "that region?",
+    ),
+    "database-migration": (
+        "What is your method for migrating production databases while keeping downtime minimal?",
+        "How are production database migrations sequenced, and what downtime should we plan for?",
+        "Which database migration patterns do you use, and how is data integrity verified after "
+        "cutover?",
+    ),
+    "delivery-centres": (
+        "Which delivery centres would staff this work, and how is time zone coverage arranged?",
+        "List your delivery centre locations and explain how coverage is maintained across "
+        "time zones.",
+        "From which delivery centres would this programme be resourced, and what working hours "
+        "does that cover?",
+    ),
+    "dependency-discovery": (
+        "How is application dependency discovery carried out, and how are the findings validated?",
+        "Set out the discovery process used to map dependencies between applications before "
+        "migration.",
+        "What tooling discovers application dependencies, and how are gaps in the resulting map "
+        "closed?",
+    ),
+    "disaster-recovery": (
+        "What disaster recovery design applies to migrated workloads, and how often is it tested?",
+        "Set out your disaster recovery approach after migration, including the testing regime "
+        "and recovery targets.",
+        "What recovery point and recovery time objectives do migrated workloads achieve, and "
+        "how is disaster recovery rehearsed?",
+    ),
+    "encryption-key-management": (
+        "What encryption applies in the target environment, and who holds and rotates the keys?",
+        "Set out your key management model for the target platform, including encryption at "
+        "rest and in transit.",
+        "Which encryption standards apply to migrated data, and how is key management separated "
+        "from platform administration?",
+    ),
+    "engagement-model": (
+        "What engagement model do you propose, and how would the work be structured into phases?",
+        "How is an engagement of this kind structured commercially, and where are the decision "
+        "points?",
+        "What does your engagement model look like in practice, from mobilisation through to "
+        "steady state?",
+    ),
+    "finops-reporting": (
+        "What visibility do we get of cloud consumption, and how does that feed cost governance?",
+        "How is cloud spend reported to us, and what governance surrounds ongoing cost management?",
+        "Which forums own cost governance, and how frequently is cloud consumption reported "
+        "against budget?",
+    ),
+    "gdpr-handling": (
+        "What controls apply to personal data during migration, and how are GDPR obligations "
+        "discharged?",
+        "How are GDPR responsibilities allocated and evidenced where personal data moves "
+        "between environments?",
+        "Who acts as processor for personal data during migration, and what GDPR safeguards "
+        "apply to that processing?",
+    ),
+    "governance-model": (
+        "What governance structure would you establish, and who sits on it?",
+        "Set out the programme governance you propose, including forums, cadence and decision "
+        "rights.",
+        "Which governance forums would run this programme, at what cadence, and with what "
+        "escalation route?",
+    ),
+    "identity-integration": (
+        "How does existing identity provision connect to the target platform, and what access "
+        "management model applies?",
+        "Set out the identity federation and access management design for the migrated estate.",
+        "How is identity federated into the target platform, and what access management "
+        "controls follow from it?",
+    ),
+    "incident-notification": (
+        "How would a security incident be notified to us, and within what timescales?",
+        "Set out your incident notification process, including escalation paths for a confirmed "
+        "security breach.",
+        "What triggers a security incident notification to the customer, and who issues it?",
+    ),
+    "iso-soc-scope": (
+        "Which security certifications do you currently hold, and what scope does each cover?",
+        "List your security certifications and attestations, with the scope statement applying "
+        "to each.",
+        "Which security certifications cover the services proposed here, and what scope "
+        "statement applies to each?",
+    ),
+    "knowledge-transfer": (
+        "How is knowledge transferred to our own teams during and after the programme?",
+        "What knowledge transfer and enablement do you provide so customer teams can operate "
+        "the platform?",
+        "What does knowledge transfer look like in practice, and how is team readiness "
+        "measured before handover?",
+    ),
+    "landing-zone": (
+        "What does your landing zone design look like, and how are guardrails applied and "
+        "enforced?",
+        "Set out the landing zone architecture you would build, including preventive and "
+        "detective guardrails.",
+        "How is the landing zone accounted and segmented, and which guardrails are preventive "
+        "rather than detective?",
+    ),
+    "migration-tooling-selection": (
+        "On what basis is migration tooling selected for a particular estate?",
+        "How are migration tooling decisions made, and how is the selection justified to the "
+        "customer?",
+        "Which migration tooling would you propose for our estate, and why that selection?",
+    ),
+    "network-connectivity": (
+        "What hybrid network connectivity is established during migration, and how is it secured?",
+        "How is network connectivity maintained between on-premises and cloud environments "
+        "through the migration?",
+        "What network connectivity is required during the hybrid period, and how is it "
+        "decommissioned afterwards?",
+    ),
+    "observability": (
+        "What observability, monitoring and alerting do you put in place for migrated workloads?",
+        "How is observability established for a workload once migrated, and who consumes it?",
+        "What observability tooling is deployed for migrated workloads, and who holds the "
+        "dashboards after handover?",
+    ),
+    "partnerships": (
+        "Which cloud provider partnerships do you hold, and what competencies have you achieved?",
+        "Set out your partnership status with each major cloud provider and any relevant "
+        "competencies.",
+        "At what tier do you partner with each cloud provider, and which competencies are "
+        "currently held?",
+    ),
+    "performance-validation": (
+        "How is workload performance validated after migration, and against what baseline?",
+        "What performance validation and acceptance testing follows a migration?",
+        "Which performance criteria must a migrated workload meet before it is accepted?",
+    ),
+    "quality-system": (
+        "What quality management system governs delivery, and how is its maturity assessed?",
+        "Set out your quality management system and the evidence of delivery maturity behind it.",
+        "Which quality management standards do you certify against, and how is delivery "
+        "maturity evidenced?",
+    ),
+    "raci-model": (
+        "What RACI model applies across the migration programme?",
+        "Set out responsibilities and accountabilities for the migration programme in a RACI.",
+        "How are migration programme responsibilities split between your team and ours in a RACI?",
+    ),
+    "reference-experience": (
+        "What comparable migration programmes have you delivered, and at what scale?",
+        "Provide references for migration programmes of comparable size and complexity.",
+        "Which migration programmes of comparable scope can you reference, and what were the "
+        "outcomes?",
+    ),
+    "retention-continuity": (
+        "How is key-person risk managed, and what ensures team continuity across the programme?",
+        "What arrangements maintain continuity of the team, and how is dependence on key "
+        "individuals reduced?",
+        "What is your attrition rate on programmes of this length, and how is team continuity "
+        "protected?",
+    ),
+    "sixr-strategy": (
+        "How is the 6R disposition determined for each workload, and who signs it off?",
+        "What process assigns a migration strategy to each workload, and how are 6R "
+        "dispositions recorded?",
+        "Which 6R disposition would each workload receive, and what evidence drives that "
+        "migration strategy?",
+    ),
+    "subcontractor-model": (
+        "Would any subcontractors be used on this programme, and how are they governed?",
+        "What is your subcontractor model, and what controls and flow-down obligations apply "
+        "to them?",
+        "Which parts of the work would subcontractors deliver, and how is their performance "
+        "governed?",
+    ),
+    "team-model": (
+        "What team model would you deploy for a migration of this scale?",
+        "Set out the team structure and staffing profile proposed for a migration of this size.",
+        "Which roles make up the proposed team model, and how does it scale across migration "
+        "waves?",
+    ),
+    "vulnerability-management": (
+        "What is your vulnerability management and patching process across the estate?",
+        "How are vulnerabilities identified, prioritised and patched, and to what timescales?",
+        "How quickly are critical vulnerabilities patched, and what governs the patch "
+        "management cycle?",
+    ),
+    "warranty-process": (
+        "What warranty applies after migration, and for how long does it run?",
+        "Set out your post-migration warranty arrangements and how defects are handled within "
+        "them.",
+        "What does the post-migration warranty cover, and how are defects raised within it?",
+    ),
+    "wave-planning": (
+        "How are workloads sequenced into migration waves, and what drives the ordering?",
+        "What determines the composition and order of migration waves across the portfolio?",
+        "Which criteria decide the migration wave a given workload is placed in?",
+    ),
+}

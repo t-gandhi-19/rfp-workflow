@@ -1,0 +1,88 @@
+# LOCAL-TIER OVERRIDE. This is NOT the shipped configuration.
+#
+# `config.yaml` is the shipped one and it stands: CLAUDE.md's alias table puts
+# `drafter-model` and `critic-model` on Groq Llama 3.3 70B, because they are the
+# two quality-critical steps. Nothing in this file changes that decision.
+#
+# WHAT THIS IS FOR. A host with no Groq credential can still exercise the whole
+# pipeline end to end — retrieval, drafting, critique, guardrails, compliance,
+# assembly, escalation routing — by pointing the two drafting aliases at the
+# local tier. Every number a run under this file produces is a number about
+# THIS configuration and must be labelled as such. They are not the numbers of
+# record, which are defined as the shipped rerank-ON Groq configuration.
+#
+# `llama3.2:3b`, chosen by measurement rather than preference. `llama3.1:8b`
+# follows structured-output instructions better and was tried first, but drafting
+# with tools on a CPU-only host took so long that no question completed in nine
+# minutes. The 3B tier trades draft quality for a run that finishes — which is
+# the right trade when the purpose is to exercise the pipeline end to end, and
+# the wrong one for anything called a quality number. Neither is the shipped tier.
+#
+# JUDGE-MODEL IS DELIBERATELY LEFT ON GROQ AND THEREFORE UNUSABLE HERE.
+# D16's first compensating control is that the judge resolves to a DIFFERENT
+# MODEL FAMILY than the drafter, so a model never grades its own prose. This
+# host has one family (llama) plus an embedder, so there is no local judge that
+# satisfies it. Pointing this alias at llama while the drafter is llama would
+# not be a degraded measurement, it would be a model marking its own homework —
+# so the quality and hallucination categories go UNMEASURED under this file,
+# and `tests/unit/test_model_pins.py` still asserts the families differ in the
+# shipped config.
+#
+# Usage:
+#   docker compose ... -f docker-compose.yml -f docker/litellm/local-tier.override.yml up -d litellm
+
+model_list:
+  # ---- unchanged from the shipped config ---------------------------------
+  - model_name: triage-model
+    litellm_params:
+      model: ollama/llama3.2:3b
+      api_base: os.environ/OLLAMA_BASE_URL
+
+  - model_name: extract-assist-model
+    litellm_params:
+      model: ollama/llama3.2:3b
+      api_base: os.environ/OLLAMA_BASE_URL
+
+  - model_name: rerank-model
+    litellm_params:
+      model: ollama/llama3.1:8b
+      api_base: os.environ/OLLAMA_BASE_URL
+      temperature: 0
+
+  - model_name: loginterp-model
+    litellm_params:
+      model: ollama/llama3.2:3b
+      api_base: os.environ/OLLAMA_BASE_URL
+
+  - model_name: embed-model
+    litellm_params:
+      model: ollama/nomic-embed-text:v1.5
+      api_base: os.environ/OLLAMA_BASE_URL
+
+  # ---- THE OVERRIDE: the two quality-critical steps, run locally ----------
+  - model_name: drafter-model
+    litellm_params:
+      model: ollama/llama3.2:3b
+      api_base: os.environ/OLLAMA_BASE_URL
+
+  - model_name: critic-model
+    litellm_params:
+      model: ollama/llama3.2:3b
+      api_base: os.environ/OLLAMA_BASE_URL
+
+  # ---- NOT overridden, on purpose. See the header. ------------------------
+  - model_name: judge-model
+    litellm_params:
+      model: groq/qwen/qwen3-32b
+      api_key: os.environ/GROQ_API_KEY
+
+litellm_settings:
+  drop_params: true
+  cache: true
+  cache_params:
+    type: local
+    supported_call_types: ["embedding"]
+  num_retries: 2
+  # Generous: an 8B model drafting on CPU is slow, and a timeout that fired
+  # mid-draft would look like a model failure rather than a host one.
+  request_timeout: 900

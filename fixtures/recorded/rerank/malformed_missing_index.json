@@ -1,0 +1,29 @@
+{
+  "candidate_count": 8,
+  "elapsed_seconds": 94.2,
+  "model_alias": "rerank-model",
+  "model_tag": "llama3.1:8b",
+  "observed": "Seven scores returned for eight candidates: index 1 is absent. Observed from llama3.1:8b at temperature 0 on a CPU-only host, and reproduced identically on a second run. Stage C must treat this as rerank-disabled for the affected question rather than scoring the missing candidate zero.",
+  "prompt_name": "rerank",
+  "prompt_version": 1,
+  "raw_content": "{\"scores\": [{\"index\": 0, \"score\": 1.0}, {\"index\": 2, \"score\": 0.5}, {\"index\": 3, \"score\": 0.0}, {\"index\": 4, \"score\": 1.0}, {\"index\": 5, \"score\": 1.0}, {\"index\": 6, \"score\": 0.0}, {\"index\": 7, \"score\": 0.8}]}",
+  "recorded_on": "2026-08-10",
+  "score_count": 7,
+  "scored_indices": [
+    0,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7
+  ],
+  "temperature": 0,
+  "usage": {
+    "completion_tokens": 103,
+    "completion_tokens_details": null,
+    "prompt_tokens": 475,
+    "prompt_tokens_details": null,
+    "total_tokens": 578
+  }
+}

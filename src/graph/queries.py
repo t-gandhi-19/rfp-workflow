@@ -29,15 +29,60 @@ from src.graph.driver import normalise_name
 
 
 class SimilarQuestion(BaseModel):
-    """One vector-index hit, before any graph multiplier is applied."""
+    """One vector-index hit, before any graph multiplier is applied.
+
+    `score` is a TRUE COSINE, converted from the index's own scale by
+    :func:`index_score_to_cosine`. See that function for why the distinction is
+    load-bearing rather than pedantic.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
     question_id: str
     text: str
     normalized_text: str
-    score: float = Field(ge=0.0, le=1.0)
+    #: Cosine similarity in [-1, 1]. Not the raw index score.
+    score: float = Field(ge=-1.0, le=1.0)
     answer_ids: list[str] = Field(default_factory=list)
+
+
+def index_score_to_cosine(score: float) -> float:
+    """Convert Neo4j's cosine index score into an actual cosine.
+
+    **Neo4j does not return the cosine.** For a `cosine` vector index it returns
+    a similarity normalised into [0, 1]:
+
+        score = (1 + cos) / 2        so        cos = 2 * score - 1
+
+    Everything downstream — the calibration mapping, the derived floor, the
+    relevance blend — is defined on the COSINE. Calibration measures its anchors
+    with a plain dot product over unit vectors (`src.retrieval.calibration.
+    cosine`), never through the index, so the two numbers live in different
+    spaces and only one of them is what the floor was derived over.
+
+    WHAT THIS COST, recorded because the shape recurs. Feeding the index score
+    straight into `calibrated()` inflates every candidate: the background median
+    0.4930 arrives as 0.7465 and the same-subject median 0.7718 arrives as
+    0.8859, so scores that should sit near the middle of the band saturate at
+    the top of it. Measured on the golden set, that made **all twenty** questions
+    MATCHED — including the three the corpus deliberately cannot answer — with
+    Recall@5 at 0.2667, because the floor no longer rejected anything and the
+    ordering was decided by preference among uniformly-saturated relevances.
+
+    It is the third instance of one fault: two numbers in different units
+    compared as though they were the same. Amendment L was a calibrated-space
+    floor compared against raw cosine; the task-prefix bug was two differently
+    conditioned embedding spaces; this is an index score compared against a
+    cosine-derived floor.
+
+    WHY THE D19 PROBE GATE DID NOT CATCH IT. The tier-2 canary lands the golden
+    questions on the derived floor using calibration's own dot product. It never
+    reads the vector index, so calibration was entirely self-consistent while
+    disagreeing with the graph. A guard that shares its inputs with the thing it
+    guards can only prove internal consistency — which is why the retrieval eval
+    runs against the real index and is the check that found this.
+    """
+    return 2.0 * score - 1.0
 
 
 class AnswerRecord(BaseModel):
@@ -98,18 +143,46 @@ class CoverageGap(BaseModel):
 # Queries
 # ---------------------------------------------------------------------------
 
+#: The index is asked for more than `k` because the visibility filter runs after
+#: it. Without over-fetching, a run whose nearest neighbours happen to be another
+#: customer's confidential material would silently come back short.
+_VECTOR_OVERFETCH = 4
+
 _FIND_SIMILAR = """
-CALL db.index.vector.queryNodes($index_name, $k, $embedding)
+CALL db.index.vector.queryNodes($index_name, $fetch, $embedding)
 YIELD node, score
+// AMENDMENT P: paraphrases are calibration-only and are never candidates.
+//
+// Ingest already keeps them out of the vector index, so in a correctly built
+// graph this clause matches nothing. It is here anyway, because the two
+// mechanisms fail in different ways: the ingest rule protects against a
+// paraphrase being INDEXED, this one against a paraphrase being RETURNED if one
+// ever is — by a re-embed against an older graph, or a hand-run write. A
+// paraphrase carries no answer of its own, so surfacing one would put a
+// duplicate of an existing candidate into the list to compete for a rank.
+WHERE NOT node:Paraphrase
+WITH node, score
 MATCH (node)-[:BELONGS_TO]->(:Domain {key: $domain})
-OPTIONAL MATCH (node)-[:ANSWERED_BY]->(a:Answer)
+// A question only qualifies if it has at least one LIVE answer this customer is
+// allowed to see. Confidential material belongs to the customer whose RFP the
+// question was asked in.
+MATCH (node)-[:ANSWERED_BY]->(a:Answer)
+WHERE coalesce(a.superseded, false) = false
+  AND (
+    coalesce(a.confidential, false) = false
+    OR EXISTS {
+      MATCH (node)-[:ASKED_IN]->(:RFP)-[:ISSUED_BY]->(owner:Customer)
+      WHERE owner.name = $requesting_customer
+    }
+  )
 WITH node, score, collect(DISTINCT a.id) AS answer_ids
-RETURN node.id            AS question_id,
-       node.text          AS text,
+RETURN node.id              AS question_id,
+       node.text            AS text,
        node.normalized_text AS normalized_text,
-       score              AS score,
-       [x IN answer_ids WHERE x IS NOT NULL] AS answer_ids
+       score                AS score,
+       answer_ids           AS answer_ids
 ORDER BY score DESC, question_id ASC
+LIMIT $k
 """
 
 
@@ -118,28 +191,56 @@ async def find_similar_questions(
     *,
     embedding: list[float],
     domain: str,
+    requesting_customer: str,
     k: int,
 ) -> list[SimilarQuestion]:
-    """Top-k in-domain questions by cosine similarity.
+    """Top-k in-domain questions this customer is permitted to see.
 
-    The domain filter is part of the same query as the vector search — that is
-    the point of a native vector index, and why there is no separate vector
-    store to drift out of sync.
+    Domain filtering, supersession and confidentiality all resolve inside the
+    same query as the vector search. That is the point of a native vector index
+    — and it means a caller cannot obtain a candidate they should not have, no
+    matter what they do afterwards.
+
+    `requesting_customer` is required, not optional with a permissive default:
+    an optional visibility parameter is one forgotten argument away from a leak.
     """
     if k <= 0:
         return []
+    if not requesting_customer.strip():
+        raise ValueError("requesting_customer is required — visibility cannot be left implicit")
     expected = embedding_config().model.dimensions
     if len(embedding) != expected:
         raise ValueError(f"embedding has {len(embedding)} dimensions, index expects {expected}")
+
+    # `index_score_to_cosine` inverts the normalisation Neo4j applies to a
+    # COSINE index specifically. A euclidean index normalises differently, so
+    # the same conversion would silently produce a number that is not a cosine
+    # and the floor would judge it anyway — the exact failure this whole path
+    # exists to have caught once.
+    similarity = embedding_config().index.similarity
+    if similarity != "cosine":
+        raise ValueError(
+            f"the vector index is configured for '{similarity}' similarity, but retrieval "
+            f"converts scores assuming 'cosine'. Calibration measures cosine anchors, so a "
+            f"different index similarity needs both a new conversion and a recalibration."
+        )
     result = await session.run(
         _FIND_SIMILAR,
         index_name=embedding_config().index.name,
+        fetch=k * _VECTOR_OVERFETCH,
         k=k,
         embedding=embedding,
         domain=domain,
+        requesting_customer=requesting_customer,
     )
     records = [record.data() async for record in result]
-    return [SimilarQuestion.model_validate(record) for record in records]
+    # Converted HERE, at the one boundary that knows the number came out of a
+    # Neo4j cosine index. Every consumer downstream is entitled to assume a
+    # cosine, because that is what calibration measured its anchors in.
+    return [
+        SimilarQuestion.model_validate({**record, "score": index_score_to_cosine(record["score"])})
+        for record in records
+    ]
 
 
 _ANSWER_LINEAGE = """
@@ -270,11 +371,17 @@ async def get_sme_for_capability(session: AsyncSession, *, capability_id: str) -
 
 _ANSWERS_FOR_QUESTION = """
 MATCH (q:Question {id: $question_id})-[:ANSWERED_BY]->(a:Answer)
+OPTIONAL MATCH (q)-[:ASKED_IN]->(:RFP)-[:ISSUED_BY]->(cust:Customer)
+WITH q, a, cust
 WHERE ($exclude_superseded = false OR coalesce(a.superseded, false) = false)
-  AND ($exclude_confidential = false OR coalesce(a.confidential, false) = false)
+  // Confidentiality is not optional. A confidential answer is visible only to
+  // the customer it belongs to; there is no parameter that relaxes this.
+  AND (
+    coalesce(a.confidential, false) = false
+    OR cust.name = $requesting_customer
+  )
 OPTIONAL MATCH (a)-[:RESULTED_IN]->(o:Outcome)
 OPTIONAL MATCH (a)-[:AUTHORED_BY]->(sme:SME)
-OPTIONAL MATCH (q)-[:ASKED_IN]->(:RFP)-[:ISSUED_BY]->(cust:Customer)
 RETURN a.id          AS answer_id,
        a.text        AS text,
        a.answer_date AS answer_date,
@@ -291,20 +398,28 @@ async def answers_for_question(
     session: AsyncSession,
     *,
     question_id: str,
+    requesting_customer: str,
     exclude_superseded: bool = True,
-    exclude_confidential: bool = True,
 ) -> list[AnswerRecord]:
-    """Answers attached to a question, newest first.
+    """Answers attached to a question that this customer may see, newest first.
 
-    Both exclusions default to on and are applied inside Cypher. A superseded
-    answer reaching a draft is a staleness bug the eval harness scores at zero
-    tolerance, so the safe behaviour is the one you get by not thinking about it.
+    There is deliberately **no** `exclude_confidential` parameter. It was
+    removed rather than defaulted, because a boolean a caller can pass `False`
+    to is a leak waiting for one careless call site; confidentiality is now a
+    property of the query, not a choice the caller makes.
+
+    `exclude_superseded` remains a parameter because a caller sometimes
+    legitimately wants the full chain (lineage, audit). It defaults to on, since
+    a superseded answer reaching a draft is a staleness bug the harness scores
+    at zero tolerance.
     """
+    if not requesting_customer.strip():
+        raise ValueError("requesting_customer is required — visibility cannot be left implicit")
     result = await session.run(
         _ANSWERS_FOR_QUESTION,
         question_id=question_id,
+        requesting_customer=requesting_customer,
         exclude_superseded=exclude_superseded,
-        exclude_confidential=exclude_confidential,
     )
     records = [record.data() async for record in result]
     return [AnswerRecord.model_validate(record) for record in records]

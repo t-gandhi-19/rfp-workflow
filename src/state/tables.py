@@ -242,7 +242,35 @@ eval_results = Table(
 )
 
 
+calibration_artifacts = Table(
+    "calibration_artifacts",
+    metadata,
+    # Natural key: one artifact per (model, corpus, geometry). Re-running
+    # `make calibrate` against an unchanged model and corpus overwrites rather
+    # than accumulating, which keeps the table a statement of the current
+    # calibration instead of a log of attempts.
+    Column("embed_model_tag", String(128), nullable=False),
+    Column("corpus_hash", String(64), nullable=False),
+    Column("geometry", String(64), nullable=False),
+    Column("computed_at", DateTime(timezone=True), nullable=False),
+    Column("background_pair_count", Integer, nullable=False),
+    Column("same_topic_pair_count", Integer, nullable=False),
+    Column("bg_p50", Numeric(8, 6), nullable=False),
+    Column("bg_p95", Numeric(8, 6), nullable=False),
+    Column("bg_p99", Numeric(8, 6), nullable=False),
+    Column("same_topic_p05", Numeric(8, 6), nullable=False),
+    Column("same_topic_p50", Numeric(8, 6), nullable=False),
+    # Stored rather than recomputed on read, so the number a run actually used
+    # is recoverable even after the derivation rule changes.
+    Column("derived_floor", Numeric(8, 6), nullable=False),
+    Column("written_by", Text, nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=NOW),
+    PrimaryKeyConstraint("embed_model_tag", "corpus_hash", "geometry"),
+)
+
+
 __all__ = [
+    "calibration_artifacts",
     "compliance_results",
     "critiques",
     "drafts",

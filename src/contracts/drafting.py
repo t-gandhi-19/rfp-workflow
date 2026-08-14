@@ -7,6 +7,101 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from src.contracts.thresholds import confidence_escalation_threshold
 
 
+class DraftClaim(BaseModel):
+    """One assertion the draft makes, and the sources behind it.
+
+    The drafter decomposes its own answer into claims because THAT is what makes
+    coverage computable. Asking a model "how much of this is supported?" gets a
+    number; asking it "what did you assert, and from where?" gets a structure
+    arithmetic can be done on, and the arithmetic is ours (rule 3).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    text: str = Field(min_length=1)
+    #: Empty means the claim carries no citation — which is what makes it an
+    #: unsupported claim, and what drives coverage below 1.
+    source_ids: list[str] = Field(default_factory=list)
+
+    @property
+    def is_supported(self) -> bool:
+        return bool(self.source_ids)
+
+
+class DraftPayload(BaseModel):
+    """What the DRAFTER TASK returns — the model's half, and only its half.
+
+    THERE IS NO CONFIDENCE FIELD, and its absence is the design. Build prompt
+    §10: confidence is arithmetic over things already measured, never a model's
+    self-report. A model asked for a number will supply a fluent one, and it
+    would then be sitting next to the real one with nothing marking which is
+    which. Making the field impossible to return is stronger than a prompt
+    asking the model not to return it — which the prompt also does.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    question_id: str = Field(min_length=1)
+    answer_text: str
+    claims: list[DraftClaim] = Field(default_factory=list)
+    #: The drafter's own escalate-rather-than-invent decision. The controller
+    #: can only ever ADD to this — a guardrail or a low computed confidence
+    #: escalates an answer the drafter was happy with, never the reverse.
+    escalate: bool = False
+    escalation_reason: str | None = None
+
+    @property
+    def source_ids(self) -> list[str]:
+        """Every source cited by any claim, in first-seen order."""
+        seen: list[str] = []
+        for claim in self.claims:
+            for source_id in claim.source_ids:
+                if source_id not in seen:
+                    seen.append(source_id)
+        return seen
+
+    @property
+    def unsupported_claims(self) -> list[str]:
+        return [claim.text for claim in self.claims if not claim.is_supported]
+
+    @model_validator(mode="after")
+    def _an_escalation_says_why(self) -> DraftPayload:
+        if self.escalate and not (self.escalation_reason or "").strip():
+            raise ValueError("escalate=True requires a non-empty escalation_reason")
+        return self
+
+
+class ConfidenceInputs(BaseModel):
+    """The measured terms `compute_confidence` combines.
+
+    Carried on the answer so the controller can RE-DERIVE confidence once the
+    critic's delta is known, rather than folding the delta into an already
+    clamped number. Those two are equal only while the clamp bounds happen to be
+    [0, 1] — they are, today, in `scoring.yaml` — and a config change would
+    silently turn an exact recomputation into an approximation with nothing to
+    catch it.
+
+    Rule 3: these are inputs to arithmetic the controller performs. The model
+    supplies the prose and the citations; it never supplies the number.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    #: `final_score` of the source the answer principally rests on.
+    primary_final_score: float = Field(ge=0.0, le=1.0)
+    claims_with_sources: int = Field(ge=0)
+    total_claims: int = Field(ge=0)
+
+    @model_validator(mode="after")
+    def _sourced_claims_do_not_exceed_total(self) -> ConfidenceInputs:
+        if self.claims_with_sources > self.total_claims:
+            raise ValueError(
+                f"{self.claims_with_sources} sourced claims exceeds "
+                f"{self.total_claims} total claims"
+            )
+        return self
+
+
 class DraftedAnswer(BaseModel):
     """One drafted answer with its citations and computed confidence.
 
@@ -29,6 +124,11 @@ class DraftedAnswer(BaseModel):
     needs_sme_review: bool
     unsupported_claims: list[str] = Field(default_factory=list)
     escalation_reason: str | None = None
+    #: None for an answer read back from Postgres — the table stores the
+    #: confidence, not the terms behind it. That is correct rather than lossy:
+    #: an answer being resumed is already terminal, so no critique is pending
+    #: and nothing remains to re-derive.
+    confidence_inputs: ConfidenceInputs | None = None
 
     @model_validator(mode="after")
     def _unescalated_answers_are_grounded(self) -> DraftedAnswer:

@@ -12,21 +12,37 @@ Import from this package root rather than the submodules:
 
 from __future__ import annotations
 
-from src.contracts.checks import ComplianceResult, EntityCheckResult, ForbiddenContentHit
-from src.contracts.drafting import CritiqueResult, DraftedAnswer
+from src.contracts.checks import (
+    ComplianceResult,
+    EntityCheckResult,
+    ForbiddenContentHit,
+    GuardrailVerdict,
+)
+from src.contracts.drafting import (
+    ConfidenceInputs,
+    CritiqueResult,
+    DraftClaim,
+    DraftedAnswer,
+    DraftPayload,
+)
 from src.contracts.enums import (
     DocumentFormat,
     EntityType,
+    EscalationTrigger,
     HaltReason,
     Outcome,
     QuestionStatus,
     QuestionType,
+    RankingBasis,
     RetrievalStatus,
     RunStage,
+    SelectionOutcome,
 )
+from src.contracts.escalation import EscalationRecord, EscalationsRecord
 from src.contracts.retrieval import CandidateFlags, RetrievalResult, ScoredCandidate
 from src.contracts.rfp import DocumentSection, ExtractedQuestion, RFPDocument, TriageResult
 from src.contracts.run import ArtifactPaths, EvalScore, RunResult, RunState, RunTotals
+from src.contracts.selection import CandidateSelection, RetrieverSelection
 from src.contracts.thresholds import (
     ScoringConfig,
     confidence_escalation_threshold,
@@ -37,31 +53,42 @@ from src.contracts.thresholds import (
 __all__ = [
     "ArtifactPaths",
     "CandidateFlags",
+    "CandidateSelection",
     "ComplianceResult",
+    "ConfidenceInputs",
     "CritiqueResult",
     "DocumentFormat",
     "DocumentSection",
+    "DraftClaim",
+    "DraftPayload",
     "DraftedAnswer",
     "EntityCheckResult",
     "EntityType",
+    "EscalationRecord",
+    "EscalationTrigger",
+    "EscalationsRecord",
     "EvalScore",
     "ExtractedQuestion",
     "ForbiddenContentHit",
+    "GuardrailVerdict",
     "HaltReason",
     "Outcome",
     "QuestionStatus",
     "QuestionType",
     "RFPDocument",
+    "RankingBasis",
     "RetrievalResult",
     "RetrievalStatus",
+    "RetrieverSelection",
     "RunResult",
     "RunStage",
     "RunState",
     "RunTotals",
     "ScoredCandidate",
-    # config
     "ScoringConfig",
+    "SelectionOutcome",
     "TriageResult",
+    # config accessors
     "confidence_escalation_threshold",
     "reload_config",
     "scoring_config",

@@ -10,8 +10,10 @@ readme = "README.md"
 requires-python = "==3.12.*"
 license = { text = "MIT" }
 
-# Phases 1-2. Later phases add their own (Phase 4: crewai, opentelemetry,
-# openlit; Phase 6: streamlit). Keeping this lean keeps CI and image builds fast.
+# Phases 1-2 and 4. Phase 6 adds streamlit. Keeping this lean keeps CI and image
+# builds fast, which is why crewAI's arrival in Phase 4 is worth a note: it
+# resolves to roughly two hundred transitive packages, so it is pinned to the
+# framework itself and nothing is added to lean on its optional extras.
 dependencies = [
     # Phase 1
     "pydantic>=2.10,<3",
@@ -31,6 +33,22 @@ dependencies = [
     "pytesseract>=0.3.13,<1",
     "pillow>=11.0,<12",
     "reportlab>=4.2,<5",
+    # Phase 4 — the agent crew.
+    #
+    # crewAI's own model client is `litellm` the LIBRARY. Every agent here is
+    # constructed against the LiteLLM PROXY's base_url instead, so rule 5 still
+    # holds: one alias table, one retry policy, one place cost is counted. The
+    # AST guard in tests/security/ cannot see that — it reads our imports, not
+    # a dependency's — so `tests/unit/test_agent_wiring.py` asserts it directly.
+    "crewai>=0.100,<1",
+    # Phase 4 — the §19 span topology. HTTP exporter, not gRPC: the collector
+    # is reached over the same network as everything else and one protocol is
+    # one thing to debug.
+    "opentelemetry-api>=1.29,<2",
+    "opentelemetry-sdk>=1.29,<2",
+    "opentelemetry-exporter-otlp-proto-http>=1.29,<2",
+    "opentelemetry-instrumentation-fastapi>=0.50b0",
+    "opentelemetry-instrumentation-httpx>=0.50b0",
 ]
 
 [dependency-groups]
@@ -113,7 +131,7 @@ plugins = ["pydantic.mypy"]
 
 [[tool.mypy.overrides]]
 # `strict` is not a per-module option, so the strict flag set is spelled out.
-module = ["src.contracts.*", "src.graph.*"]
+module = ["src.contracts.*", "src.graph.*", "src.retrieval.*"]
 disallow_any_generics = true
 disallow_subclassing_any = true
 disallow_untyped_calls = true
@@ -133,6 +151,14 @@ module = [
     "pytesseract.*",
     "reportlab.*",
 ]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+# crewAI ships no py.typed marker. The untyped boundary is deliberately short:
+# `src/agents/crew.py` is the only module that touches it, and everything that
+# crosses back out of a crew is validated into a contract by `_require` before
+# any other code sees it.
+module = ["crewai.*"]
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]

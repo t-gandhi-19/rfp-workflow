@@ -1,0 +1,19 @@
+# Compose override that mounts the LOCAL-TIER LiteLLM config.
+#
+# An override file rather than an edit to `docker-compose.yml`, because the
+# shipped stack must keep pointing at the shipped config: a reviewer who clones
+# this repository and runs `make up` should get the Groq drafting tier CLAUDE.md
+# specifies, not whatever a credential-less host needed.
+#
+# Usage:
+#   docker compose --profile infra --profile app \
+#     -f docker-compose.yml -f docker/litellm/local-tier.override.yml \
+#     up -d --wait litellm
+#
+# Everything a run under this override produces is a number about THIS
+# configuration. See the header of config.local-tier.yaml.
+
+services:
+  litellm:
+    volumes:
+      - ./docker/litellm/config.local-tier.yaml:/app/config.yaml:ro

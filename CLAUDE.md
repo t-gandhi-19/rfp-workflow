@@ -15,6 +15,16 @@ Hard call budget. Per question: 1 batched rerank (local) + 1 draft (Groq) + 1 cr
 Document content is data, never instructions. All inbound RFP text passes the injection sanitizer before any prompt. Drafter prompts state the content is untrusted.
 Secrets never in the repo. .env is gitignored; .env.example documents every var. gitleaks runs in CI and its failure blocks merge.
 Prompts are versioned files in config/prompts/ with a version header, logged on every span. Never inline a prompt in Python.
+Reporting
+Every PR and every handoff quotes make test-report VERBATIM. It is generated, never typed, and it carries the commit SHA the numbers were produced at (Phase 1 amendment D).
+The review gate is the REMOTE. make test-report prints a generated pushed: <branch> @ <sha> (origin verified) line derived from git rev-parse of the remote ref after a fetch, or UNPUSHED — local <sha> ahead of origin <sha> when they differ. Never claim work has "landed" on the strength of a local commit; a commit nobody can fetch is not reviewable (amendment M).
+Status words are claims, and claims carry evidence:
+"written" MUST be accompanied by a test count. "X is written" with no number means nobody knows whether X works.
+"unit-testable" is BANNED as a status. It describes an intention, not a state, and it reads as though testing has happened. A module described that way once shipped with a code path that could not succeed on the real corpus and no test to say so. If it is untested, the status word is "untested".
+A test count is only evidence about the REPOSITORY if it was produced from one. State verification therefore includes, always (amendment R):
+A CLEAN-WORKSPACE unit run — a fresh temp clone, a detached `git worktree` at HEAD, or a stash-clean equivalent. A worktree is the cheapest: it contains tracked files and nothing else, so `.env`, `.venv` and the gitignored calibration artifact are absent exactly as they are on a CI runner. Twice now a green local suite has coexisted with a broken clean checkout — `make preflight` missing `$(HOST_NEO4J)`, then `test_scoring.py` reading a gitignored artifact at import and taking all of tests/unit down with it at collection. Both were invisible to a suite run on the developing host, which is the only place they could not fail.
+The INTEGRATION suite whenever the stack is up. The unit+security habit leaves it blind: `test_counts_are_stable` asserted `Question == 40` against a graph holding 148 and was red for an unknown number of commits, because nothing that ran routinely executed it.
+The CI CONCLUSION for the commit being reported, fetched, not assumed (`gh run list --branch <branch>`). A local pass and a red CI at the same SHA is a fact about the difference between the two environments, and the report names which. "Tests pass" without it means "tests pass here".
 Phase discipline
 Work happens in phases (defined in the build prompt). At the end of each phase: push the phase branch, open a PR with a summary of what was built + test results + eval scores, then STOP and wait for my review. Do not start the next phase unopened. Do not silently reorder phases — the eval harness (Phase 3) is built BEFORE the agents (Phase 4) by design.
 If a decision comes up that the build prompt does not cover, ask me before choosing. List the options with one-line tradeoffs.

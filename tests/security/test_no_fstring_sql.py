@@ -18,6 +18,7 @@ here too).
 from __future__ import annotations
 
 import ast
+import re
 from pathlib import Path
 
 import pytest
@@ -75,9 +76,30 @@ def _is_interpolated(node: ast.expr) -> str | None:
     return None
 
 
+def _mentions(keyword: str, lowered: str) -> bool:
+    """Whole-word match, not substring.
+
+    REFINED, NOT WEAKENED. The substring form flagged
+    `src/evals/registry.py`'s "DESELECTED — … excluded from this run": "select"
+    inside "deselected" plus "from" in ordinary prose. No SQL was involved, and
+    no wording of that sentence was the problem — the matcher was.
+
+    A word-boundary match still fires on every real query, because SQL keywords
+    are always whole words there (`SELECT x FROM y`, `select(*)from` — `\\b`
+    matches against punctuation too). What it stops matching is English that
+    happens to contain the letters. Loosening the SIGNATURES or adding an
+    ALLOWED_DYNAMIC_SQL entry would both have been weakenings; this removes a
+    class of false positive without removing any true one, which is why
+    `TestTheMatcherStillCatchesRealSql` below exists.
+    """
+    return re.search(rf"\b{keyword}\b", lowered) is not None
+
+
 def _looks_like_sql(text: str) -> bool:
     lowered = text.lower()
-    return any(first in lowered and second in lowered for first, second in SQL_SIGNATURES)
+    return any(
+        _mentions(first, lowered) and _mentions(second, lowered) for first, second in SQL_SIGNATURES
+    )
 
 
 def _fstring_literal_text(node: ast.JoinedStr) -> str:
@@ -165,3 +187,48 @@ class TestTheCheckItselfWorks:
         tree = ast.parse('query = f"SELECT * FROM answers WHERE id = {answer_id}"')
         node = next(n for n in ast.walk(tree) if isinstance(n, ast.JoinedStr))
         assert _looks_like_sql(_fstring_literal_text(node))
+
+
+class TestTheMatcherStillCatchesRealSql:
+    """The word-boundary refinement, pinned from both sides.
+
+    `_mentions` was changed from substring to whole-word matching after the
+    matcher flagged prose containing "DESELECTED" and "from". A refinement that
+    also stopped catching real SQL would be a weakening wearing a refinement's
+    clothes, so both halves are asserted here rather than assumed.
+    """
+
+    @pytest.mark.parametrize(
+        "query",
+        [
+            "SELECT id FROM runs",
+            "select * from answers",
+            "SELECT count(*)FROM answers",
+            "INSERT INTO drafts VALUES (1)",
+            "UPDATE runs SET stage = 'x'",
+            "DELETE FROM eval_results",
+            "DROP TABLE runs",
+            "ALTER TABLE runs ADD COLUMN x int",
+            "CREATE TABLE t (id int)",
+            "SELECT\n  id\nFROM\n  runs",
+        ],
+    )
+    def test_real_sql_is_still_flagged(self, query: str) -> None:
+        assert _looks_like_sql(query) is True, query
+
+    @pytest.mark.parametrize(
+        "prose",
+        [
+            # The exact sentence that exposed the imprecision.
+            "DESELECTED — the retrieval category was excluded from this run",
+            "Deselected categories are omitted from the report",
+            "Reselect the winner from the shortlist is fine, but preselected is prose",
+        ],
+    )
+    def test_prose_containing_the_letters_is_not(self, prose: str) -> None:
+        assert _looks_like_sql(prose) is False, prose
+
+    def test_a_whole_word_keyword_in_prose_is_still_flagged(self) -> None:
+        """The conservatism above is unchanged: prose using the keywords AS
+        words still trips the check, and that trade is deliberate."""
+        assert _looks_like_sql("Select the strongest candidate from the shortlist") is True

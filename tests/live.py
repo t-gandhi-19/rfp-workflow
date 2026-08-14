@@ -12,7 +12,9 @@ command to fix it.
 from __future__ import annotations
 
 import os
+import shutil
 import socket
+import subprocess
 from collections.abc import Callable
 
 import httpx
@@ -30,6 +32,10 @@ def keycloak_base() -> str:
 
 def write_api_base() -> str:
     return os.environ.get("WRITE_API_BASE", "http://localhost:8001")
+
+
+def mcp_base() -> str:
+    return os.environ.get("MCP_BASE", "http://localhost:8002")
 
 
 def neo4j_bolt() -> tuple[str, int]:
@@ -117,6 +123,105 @@ def require_write_api_and_keycloak() -> None:
     require_env(*WRITE_API_SECRETS)
 
 
+#: What the graph tests authenticate with. Checked alongside the port probe
+#: because a port is not an identity — see `require_neo4j`.
+NEO4J_SECRETS = ("NEO4J_PASSWORD",)
+
+
 def require_neo4j() -> None:
-    host, port = neo4j_bolt()
-    require(tcp_open("Neo4j Bolt", host, port))
+    """Bolt reachable AND the credentials to use it.
+
+    A RAW TCP PROBE CANNOT TELL WHOSE DATABASE THAT IS. On a machine running a
+    second project's stack — which is the normal case on the build host, hence
+    the 5xxxx port overrides in `.env` — port 7687 is open and belongs to
+    somebody else. A fresh clone with no `.env` then defaults to 7687, passes
+    the probe, and every graph test fails with
+
+        Neo.ClientError.Security.Unauthorized — missing key `credentials`
+
+    which is 38 red tests saying nothing about this repository. Amendment B
+    requires a fresh clone to be green-with-skips; requiring the password makes
+    the skip say "environment not loaded", which is both true and actionable.
+
+    This does not make the probe prove identity — nothing cheap does. It makes
+    the *unloaded environment* case, which is the reachable one, report itself
+    honestly instead of as a wall of authentication failures.
+    """
+    require(tcp_open("Neo4j Bolt", *neo4j_bolt()))
+    require_env(*NEO4J_SECRETS)
+
+
+def docker_cli() -> str | None:
+    """The docker CLI, under either name it goes by here.
+
+    `docker` on a Linux runner; `docker.exe` from WSL on the Windows build host,
+    where Docker Desktop runs on the Windows side and WSL interop is how a Linux
+    shell reaches it. Naming both is the difference between the container-log
+    assertions RUNNING on the developing machine and being skipped there — and
+    they are the only assertions that the audit trail exists at all, so a skip
+    would mean nobody had checked.
+
+    That is not hypothetical: the per-call log was silently discarded by uvicorn
+    until those tests ran against the container and found nothing there.
+
+    ORDER MATTERS on the Windows host. Docker Desktop puts BOTH names on the
+    PATH a WSL shell inherits, and the Linux-side `docker` is a shim that exits
+    non-zero with "could not be found in this WSL 2 distro" unless WSL
+    integration is enabled. Preferring `docker.exe` picks the one that answers;
+    on a Linux runner `docker.exe` does not exist, so the order costs nothing.
+
+    Lives here rather than in one test module because two files now read
+    container logs, and a second copy of this reasoning would drift from the
+    first the next time the host changes.
+    """
+    for name in ("docker.exe", "docker"):
+        resolved = shutil.which(name)
+        if resolved is not None:
+            return resolved
+    return None
+
+
+def container_log(container: str, *, tail: int = 400) -> str:
+    """The container's OWN emitted output.
+
+    Never caplog: the claim these assertions make is about what the DEPLOYED
+    service records, and an in-process capture proves only that a logging call
+    exists in the source.
+    """
+    resolved = docker_cli()
+    if resolved is None:
+        pytest.skip("docker CLI not available; cannot read the container's log")
+    result = subprocess.run(  # noqa: S603
+        [resolved, "logs", "--tail", str(tail), container],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        # Both streams. The WSL shim reports its refusal on stdout, so a
+        # stderr-only message left this skip blank and unexplained.
+        reason = (result.stderr.strip() or result.stdout.strip() or "no output").splitlines()
+        pytest.skip(f"cannot read logs for {container}: {reason[0]}")
+    return result.stdout + result.stderr
+
+
+#: Secrets the mcp-server integration tests authenticate with. `retriever-sa` is
+#: the caller under test; `extractor-sa` is the one deliberately without
+#: `kg-reader`, which is what makes the 403 assertion mean anything.
+MCP_SECRETS = ("RETRIEVER_SA_SECRET", "EXTRACTOR_SA_SECRET")
+
+
+def require_mcp_server() -> None:
+    """mcp-server, plus the Keycloak that issues its tokens and the Neo4j behind it.
+
+    All three, because a tool call exercises all three and a skip that named only
+    one would send the reader to the wrong service. mcp-server's /health does not
+    touch the graph — it deliberately reports the process, not its dependencies —
+    so Neo4j is probed separately rather than inferred from a 200.
+    """
+    require(
+        http_ok("Keycloak", f"{keycloak_base()}/realms/rfp/.well-known/openid-configuration"),
+        http_ok("mcp-server", f"{mcp_base()}/health"),
+        tcp_open("Neo4j Bolt", *neo4j_bolt()),
+    )
+    require_env(*MCP_SECRETS)

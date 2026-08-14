@@ -11,16 +11,347 @@ retrieval:
   top_k: 20
   # How many survive into the single batched rerank call.
   rerank_top_n: 8
-  # No candidate at or above this final_score => NO_MATCH => the drafter must
-  # escalate rather than invent an answer.
-  match_floor: 0.55
+  # THERE IS NO MATCH FLOOR KEY HERE, deliberately (amendment O).
+  #
+  # The floor is a MEASUREMENT, not a setting. It is derived by `make calibrate`
+  # from corpus statistics and stored in the calibration artifact, which is what
+  # retrieval reads at runtime. See `calibration.floor_derivation` below for the
+  # rule that produces it.
+  #
+  # Two earlier shapes of this key both failed, in opposite directions:
+  #
+  #   `match_floor: 0.55`            — a calibrated-space value compared against
+  #                                    raw cosine, which every real score
+  #                                    exceeded. The floor rejected nothing while
+  #                                    the config read as though one applied.
+  #                                    (amendment L renamed it.)
+  #   `match_floor_calibrated: 0.50` — right units, but a placeholder shipped as
+  #                                    a runtime-consumed value: known-wrong
+  #                                    until someone remembered to overwrite it,
+  #                                    and wrong silently until they did.
+  #
+  # Both keys are REMOVED rather than aliased, so a stale reference fails at
+  # config load instead of resolving to something plausible.
+
+rerank:
+  # Stage C: ONE batched call per question, scoring the surviving candidates
+  # 0-1 for relevance.
+  #
+  # WHETHER THIS SHIPS ON IS AN OPEN MEASUREMENT, NOT AN OPINION.
+  # The retrieval eval runs the full golden set twice, rerank on and off, and
+  # reports Recall@5 and MRR side by side. The decision rule, to be applied once
+  # and recorded here with the measured deltas and the date:
+  #
+  #     if |ΔRecall@5| < 0.02 AND |ΔMRR| < 0.03  ->  enabled: false
+  #     otherwise                                ->  enabled: true, cost accepted
+  #
+  # The rule exists because reranking costs ~95-120s per question on this
+  # CPU-only host, and "it feels better" is not a reason to pay that. Whichever
+  # way it lands, the unused path stays tested in CI via recorded responses.
+  #
+  # RE-CONFIRMED 2026-08-14 at 9c239da, through `make evals --rerank --ablation`
+  # — the step 8 harness rather than the step 5 runner, so the decision is now
+  # reproduced by the command the Makefile documents. Same graph, same artifact,
+  # same 20 questions, real embeddings (nomic-embed-text:v1.5, corpus
+  # a3d1eea3a24d6cb7).
+  #
+  #                        rerank OFF     rerank ON      delta (on - off)
+  #   Recall@5               1.0000         1.0000          0.0000
+  #   rank1_accuracy         0.9333         1.0000         +0.0667
+  #   MRR                    0.9667         1.0000         +0.0333
+  #   preference-decisive    0.0667         0.0000         -0.0667
+  #   baits refused          2 (3.4, 4.2)   1 (3.4)        -1
+  #   verdict                FAIL           PASS
+  #
+  #   rule applied verbatim, unchanged:
+  #     |dRecall@5| < 0.02 AND |dMRR| < 0.03  ->  enabled: false
+  #     0.0000 < 0.02 TRUE;  0.0333 < 0.03 FALSE.  The AND fails.
+  #   DECISION UNCHANGED: rerank.enabled stays TRUE, cost accepted.
+  #
+  #   STILL A CLOSE CALL, and recorded as one rather than rounded into comfort:
+  #   0.0333 against a 0.03 threshold. The decision FLIPS AT A THRESHOLD OF
+  #   0.035. A reader proposing to relax that number is proposing to disable
+  #   rerank, and should read the coupling below before doing so.
+  #
+  #   THE OFF ARM NOW FAILS ITS CATEGORY OUTRIGHT, which it did not in the
+  #   original measurement — because `rank1_accuracy` did not exist then. That is
+  #   the gate doing its job on a non-shipped arm, not a regression: the OFF arm
+  #   scores 14/15 precisely because of the golden-1.1 inversion, reproduced
+  #   below to the fourth decimal.
+  #
+  #     rerank OFF, question 1.1, floor 0.5975:
+  #       1. ANS-0032   rel 0.8247  pref 1.1951  final 0.9856   <- wins
+  #       2. ANS-0037   rel 1.0000  pref 0.9045  final 0.9045   <- the key's
+  #                                                                only direct
+  #                                                                team-model
+  #                                                                answer
+  #     rerank ON:  ANS-0037 at rank 1. Expected answer rank 1 vs 2.
+  #
+  # VALIDITY CONFIRMED BEFORE ACCEPTING THE RESULT (as at bdddbba). The run is
+  # keyed 9c239da, and `git diff --name-only 9c239da..HEAD` over src/retrieval,
+  # src/contracts/thresholds.py, config/scoring.yaml and fixtures/ is EMPTY — so
+  # nothing touching scoring, retrieval, calibration or the corpus landed after
+  # the measurement. The harness captures the SHA before the first category runs
+  # (0c2af81), so a commit landing mid-run cannot relabel these numbers.
+  #
+  # STATUS: APPLIED 2026-08-13. Measured once, deliberately, on real embeddings
+  # against the final scoring, after the units fix (aa91ae0). Both arms ran on
+  # the same graph, the same artifact and the same 20 golden questions.
+  #
+  #                        rerank OFF     rerank ON      delta (on - off)
+  #   Recall@5               1.0000         1.0000          0.0000
+  #   MRR                    0.9667         1.0000         +0.0333
+  #   preference-decisive    0.0667         0.0000         -0.0667
+  #   wall clock             ~40s           33m 17s
+  #
+  #   rule:  |dRecall@5| < 0.02  AND  |dMRR| < 0.03  ->  enabled: false
+  #   applied: 0.0000 < 0.02 is TRUE; 0.0333 < 0.03 is FALSE.
+  #            The AND fails, so the rule does not fire.
+  #
+  # DECISION: enabled stays TRUE, cost accepted. It is a close call — 0.0333
+  # against a 0.03 threshold — and it is recorded as close rather than rounded
+  # into comfort.
+  #
+  # WHERE THE WHOLE DELTA COMES FROM. One question. On golden 1.1 the rerank-off
+  # arm ranks ANS-0032 (a WON RACI answer) above ANS-0037 (the LOST team-model
+  # answer the hand-written key names as "the only direct team-model answer"),
+  # because preference overturned a relevance gap of 1.0000 vs 0.8247. Rerank
+  # puts ANS-0037 back at rank 1. Recall@5 cannot see this — ANS-0037 is at rank
+  # 2 either way — so MRR is the metric carrying the signal, which is why the
+  # rule reads both.
+  #
+  # So the cost buys a specific thing rather than a general feeling: it corrects
+  # the one case in this set where preference decided a ranking relevance should
+  # have decided.
+  #
+  # THE COUPLING, recorded where the next decision will be made:
+  #
+  #   Rerank ON also corrects the golden-1.1 PRIMARY-SOURCE INVERSION. The MRR
+  #   delta that failed the AND rule IS that one flip — (1 - 0.5) / 15 = 0.0333 —
+  #   so the ablation decision and the 1.1 finding are one phenomenon, not two
+  #   coincident ones.
+  #
+  #   ANY FUTURE PROPOSAL TO DISABLE RERANK MUST RE-EVALUATE THAT FINDING FIRST,
+  #   not only the deltas. Deltas on a different corpus could easily fall inside
+  #   both thresholds while the inversion persists; shipping rerank off then
+  #   would reintroduce a wrong primary source silently.
+  #
+  #   The eval harness now gates `rank1_accuracy` (commissioned 15/15 in this
+  #   configuration), so that reintroduction fails loudly rather than passing on
+  #   a Recall@5 that cannot see it. See the D17 addendum register entry.
+  #
+  # Reassess if the corpus or the preference multipliers change.
+  enabled: true
+  # Gateway alias. Application code never names the model.
+  alias: rerank-model
+  # The concrete Ollama tag the alias must resolve to. `make preflight` asserts
+  # it is installed, for the same reason it checks the embedding model: a
+  # missing model surfaces as a confusing failure from deep inside a run.
+  tag: llama3.1:8b
+  # Deterministic scoring. A reranker that varies between identical runs makes
+  # every retrieval eval noise.
+  temperature: 0
+  # Bound on how long one batched call may take before the question falls back
+  # to rerank-disabled scoring.
+  #
+  # Measured on this CPU-only host: one batched call over 8 candidates took
+  # 120.7s (475 prompt tokens, 103 completion). 180s left only ~50% headroom on
+  # a machine that also runs another stack, so this is set from the measurement
+  # rather than from a guess.
+  timeout_seconds: 300
 
 final_score:
-  # final_score = w_vector_graph * (vector_score * graph_multiplier)
-  #             + w_rerank      * rerank_score
+  # relevance = (w_vector_graph * calibrated_similarity + w_rerank * rerank_score)
+  #             / (w_vector_graph + w_rerank)
+  #
+  # Both terms are now on [0, 1] and mean comparable things: the first is a
+  # calibrated similarity, the second a model's 0-1 relevance opinion. Before
+  # calibration the first was raw cosine, which on this corpus never went below
+  # about 0.65 — so a 50/50 "average" was in fact an average of a compressed
+  # band and a full one, and the rerank dominated by construction. These weights
+  # only became meaningful once the left-hand term was normalised.
+  #
+  # When rerank.enabled is false, or a call fails for one question, the rerank
+  # weight is redistributed onto vector_graph rather than treated as a zero
+  # score — a failed rerank must not look like "every candidate is irrelevant".
   weights:
     vector_graph: 0.5
     rerank: 0.5
+
+# D17. Relevance decides IF a candidate qualifies; preference decides WHICH of
+# the qualifying ones wins. The split exists because preference used to be able
+# to overturn relevance outright: outcome x recency x evidence spanned 0.16-1.27
+# (8x) against a similarity band of ~1.5x, so a recent won answer outranked a
+# far better match on a different topic.
+preference:
+  # Recency stops being a gate and becomes a nudge: [0.90, 1.0] instead of
+  # [0.0, 1.0]. A two-year-old answer that is exactly right should still win
+  # over a fresh answer that is merely adjacent.
+  #   recency_pref = floor + (1 - floor) * exp(-age_days / half_life)
+  recency_floor: 0.90
+  # Belt and braces on the product of outcome x evidence x recency_pref.
+  #
+  # THESE CLAMPS ARE INERT ON THE SHIPPED MULTIPLIERS, and that is recorded
+  # rather than corrected. The product cannot reach either bound:
+  #
+  #   best   won x evidence x recency_pref(0)     = 1.15 * 1.1 * 1.00 = 1.265
+  #   worst  lost x none    x recency_pref(inf)   = 0.85 * 1.0 * 0.90 = 0.765
+  #
+  # So the REAL inversion boundary is 1.265 / 0.765 = 1.6536, not the 1.30/0.75
+  # = 1.733 this comment used to claim. The old figure was derived FROM the
+  # clamps and therefore inherited their inertness — it described a boundary the
+  # code cannot reach, which is why the boundary test now drives 1.6536 from both
+  # sides instead. A test of 1.733 would have passed whether or not the real
+  # boundary held.
+  #
+  # The clamps stay. They bind only if the component multipliers above ever
+  # change, which is exactly what belt-and-braces is for, and
+  # `test_the_configured_clamps_never_actually_bind` fails loudly if that
+  # happens so the boundary can be re-derived rather than silently moving.
+  #
+  # What this means for D17's guarantee is measured and ACCEPTED — see the
+  # "D17 addendum" register entry. Two candidates that both clear the 0.5975
+  # floor differ by at most 1.0/0.5975 = 1.6735, so preference can reorder all
+  # but a 0.0200-wide sliver of the qualifying range. Above the floor every
+  # candidate is a match and choosing among matches is what preference is for;
+  # the invariant's real work is at the floor boundary, where the commissioned
+  # probe margins show it holding. No constant moves without an observed failure.
+  clamp_min: 0.75
+  clamp_max: 1.30
+
+calibration:
+  # Raw cosine is not comparable across models or corpora, so the floor is
+  # derived from corpus statistics rather than guessed. See
+  # fixtures/calibration.json and src/retrieval/calibration.py.
+  #
+  # Geometry matters: every score the floor judges is query-embedded text against
+  # document-embedded text, so the calibration statistics are measured in that
+  # same cross-prefix geometry. Document-to-document numbers are a different
+  # distribution and would misplace the floor.
+  #
+  # Guard against percentile noise on a small corpus.
+  min_background_pairs: 500
+  # The same-subject anchor is the one most at risk of being computed from
+  # almost nothing: it is the smaller population by two orders of magnitude, and
+  # a p05 taken over a handful of values is that handful's minimum wearing a
+  # percentile's name. The erosion ratchet commissions FROM that p05, so this
+  # guard protects the baseline every future regression check is measured
+  # against.
+  #
+  # DERIVATION, against the D18 population rule (query: any family member;
+  # document: indexed originals only):
+  #
+  #   32 singleton families   4 queries x 1 document - 1 self  =  3  ->  96
+  #    4 version families     5 queries x 2 documents - 2 self =  8  ->  32
+  #                                             structural max      = 128
+  #
+  #   100 / 128 = 78%, which tolerates losing roughly one family's entire
+  #   paraphrase set before firing.
+  #
+  # This value SURVIVED the population correction by arithmetic rather than by
+  # derivation — its previous rationale cited 240 pairs under the superseded
+  # all-pairs population, where the same corpus would have yielded 88 under the
+  # corrected rule and failed. The corpus gained a third paraphrase per family
+  # rather than the constant being lowered to fit: fix the data the statistic
+  # stands on, not the threshold.
+  min_same_topic_pairs: 100
+  # The same-topic p05 must clear the background p99 by at least this much, or
+  # ingest fails loudly rather than retrieval failing quietly.
+  #
+  # THE TWO-TIER SEPARATION GUARD (D18).
+  #
+  # `min_separation_raw: 0.02` used to live here. It predated every real
+  # measurement — a number chosen before anyone knew what nomic-embed-text
+  # scored on this corpus — and it was the last underived constant in this file.
+  # It also conflated two different failures. The key is REMOVED, not aliased.
+  #
+  # WHAT THESE GUARDS ARE FOR. They protect the FUTURE: they detect change
+  # against a commissioned baseline. The absolute quality standard is the
+  # zero-tolerance retrieval evals on real embeddings, which bind regardless of
+  # guard parameters. Loosening a guard here can never make retrieval
+  # acceptable; it can only stop the guard reporting.
+  #
+  # Both values are RAW COSINE gaps, measured before any mapping exists.
+  separation_guards:
+    # TIER 1 — collapse detector. Median gap, absolute floor.
+    #
+    # DERIVATION: 50% of the commissioned median gap. Set once at commissioning
+    # and not a ratchet: it exists to catch wholesale band overlap (the
+    # missing-task-prefix class of fault), where the tail statistic can be
+    # dragged around by a handful of pairs but the median cannot.
+    #   commissioned median gap: (generated below)
+    #   body_min = 0.50 x that
+    body_min: 0.1394
+
+    # TIER 2 — floor-discrimination ratchet (D19).
+    #
+    # This gates what the floor DOES, not a distribution statistic standing in
+    # for it. `make calibrate` embeds the twenty golden questions, lands them
+    # against the freshly derived floor, and checks that each still falls on the
+    # correct side by a retained fraction of its commissioned margin.
+    #
+    # THE PROBES GATE; THEY NEVER DERIVE. The floor's value comes only from
+    # corpus-internal statistics. This is a canary confirming the derived floor
+    # still discriminates — the zero-tolerance eval core embedded into
+    # calibration, so a corpus or model change run through `make calibrate`
+    # alone cannot silently ship a non-discriminating floor.
+    #
+    # It replaces `same_p05 - bg_p99`, which is now REPORTED as a diagnostic and
+    # gates nothing. That statistic was a proxy, and it diverged from its target:
+    # open-ended downward (the same-subject tail is set by the hardest
+    # legitimate paraphrase, an authorship boundary with no crisp edge),
+    # non-convergent under data addition (every paraphrase added to firm up the
+    # estimate is a new candidate for "worst match" — two per family gave
+    # +0.0237, three gave -0.0245), and correlated (version families contribute
+    # pairs against two byte-identical documents). It failed while every
+    # operational margin held or improved.
+    #
+    # Gated: the three unanswerables must stay BELOW the floor; the weakest
+    # answerable must stay ABOVE it.
+    # Advisory: baits 3.4 and 4.2 are reported and never gated — 3.4 is refused
+    # on legal grounds regardless of retrieval, and 4.2 is owned by Phase 4's
+    # pricing block.
+    floor_discrimination:
+      retention: 0.6
+      # GENERATED by `make calibrate-commission`. Margins in CALIBRATED space,
+      # signed so positive is always correct: distance below the floor for an
+      # unanswerable, above it for an answerable.
+      #
+      # null means never commissioned — calibration refuses rather than assuming.
+      commissioned:
+        unanswerable_2_7: 0.3055
+        unanswerable_2_8: 0.2805
+        unanswerable_3_5: 0.1731
+        min_answerable: 0.2405
+
+  # HOW the floor is derived, which is what belongs in config. The VALUE it
+  # derives to belongs in the artifact (amendment O).
+  #
+  # The floor sits inside the gap between the highest an unrelated question
+  # scores and the lowest a genuine match scores — the widest defensible gap the
+  # statistics offer. `midpoint_weight` chooses where in that gap:
+  #   0.0 sits on the background anchor  (permissive: admits near-background)
+  #   1.0 sits on the same-topic anchor  (strict: rejects the weakest matches)
+  #   0.5 splits the difference
+  #
+  # Changing any of these changes what the floor MEANS, so it invalidates the
+  # stored artifact: re-run `make calibrate`.
+  floor_derivation:
+    background_anchor: bg_p99
+    same_topic_anchor: same_topic_p05
+    midpoint_weight: 0.5
+
+  # GENERATED — do not hand-edit. Written by `make calibrate` so a human reading
+  # this file can see what the rules above last produced, without opening the
+  # artifact. Retrieval never reads these lines.
+  #
+  #   last derived floor: 0.5975
+  #   geometry:           query_x_document
+  #   population:         query:any_family_member x document:indexed_originals
+  #   computed at:        2026-08-13T20:22:26+00:00
+  #   embed model:        nomic-embed-text:v1.5
+  #   body separation:    +0.2788
+  #   tail separation:    -0.0245
 
 graph_multiplier:
   # Applied to vector_score before blending. Encodes what the graph knows that
